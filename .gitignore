@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+*.egg
+dist/
+build/
+
+# Data directories (runtime generated)
+data/
+demo_data/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+node_debug.log
+
+# Test output
+test_results.txt
+debug_output*.txt
+verify_output*.txt
+
+# CLI history
+.minidb_history
+
+# Environment
+.env
+.venv/
+venv/
+env/
