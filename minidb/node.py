@@ -15,7 +15,7 @@ from .cluster import ClusterCoordinator, NodeInfo, ReadCoordinator
 from .cluster.election import LogEntry
 from .sharding import ConsistentHashRing, PartitionManager, ShardMigrationManager, ShardRouter
 from .repair import AntiEntropyManager
-from .testing import (
+from .chaos import (
     FaultInjector, RateLimiter, TokenBucketLimiter, BackpressureManager,
     create_network_delay, create_network_partition, create_packet_drop
 )

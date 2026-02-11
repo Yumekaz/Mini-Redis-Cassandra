@@ -16,6 +16,16 @@ from minidb.node import DatabaseNode, create_node
 from minidb.network.client import TCPClient
 
 
+def wait_for_leader(node, timeout=10):
+    """Wait for node to become leader."""
+    start = time.time()
+    while time.time() - start < timeout:
+        if node.cluster.is_leader():
+            return True
+        time.sleep(0.5)
+    return False
+
+
 def test_single_node():
     """Test single node operations."""
     print("\n" + "="*60)
@@ -32,7 +42,12 @@ def test_single_node():
         snapshot_enabled=False
     )
     node.start()
-    time.sleep(2)  # Wait for leader election
+    
+    # Wait for leader election
+    if not wait_for_leader(node, timeout=10):
+        print("FAILED: Timeout waiting for leader election")
+        node.stop()
+        return False
     
     # Connect a client
     client = TCPClient("localhost", 7001)
