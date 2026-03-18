@@ -14,7 +14,7 @@ This document explains key architectural choices and their rationale.
 - **Self-describing** - No schema files needed
 - **Trade-off accepted** - Slower than binary, but clearer
 
-## Why Raft-Lite Instead of Full Raft?
+## Why Simplified Leader Election Instead of Full Raft?
 
 Full Raft requires:
 - Log replication
@@ -27,7 +27,7 @@ Our simplified version implements:
 - Heartbeat-based failure detection
 - Automatic re-election on leader failure
 
-**Intentionally omitted**: Log replication (we use gossip instead).
+**Intentionally omitted**: full consensus-safe log replication and durable quorum commit.
 
 ## Why 150 Virtual Nodes?
 
@@ -64,4 +64,4 @@ Demonstrates the CAP theorem trade-offs:
 - `ANY` - Availability over consistency
 - `QUORUM` - Balanced
 - `ALL` - Consistency over availability
-- `STRONG` - Linearizable reads from leader
+- `STRONG` - Primary-owner reads without a full linearizable consensus layer

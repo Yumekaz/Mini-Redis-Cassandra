@@ -1,12 +1,12 @@
-# Mini-Redis/Cassandra - Distributed Key-Value Database
+# Mini-Redis/Cassandra - Educational Distributed KV Store
 
 [![Python 3.7+](https://img.shields.io/badge/python-3.7+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 ![No Dependencies](https://img.shields.io/badge/dependencies-none-green.svg)
 
-An **educational distributed, fault-tolerant, in-memory key-value database** built from scratch in Python. Demonstrates core concepts from Redis, Cassandra, and etcd — ideal for learning distributed systems.
+An **educational distributed, fault-tolerant, in-memory key-value store** built from scratch in Python. It combines a Redis-like command surface with Cassandra-inspired sharding, replica-set reads, and simplified leader-based coordination for learning distributed systems.
 
-> ⚠️ **Note**: This is a learning/demonstration project, not intended for production use. It implements simplified versions of distributed consensus, replication, and persistence to illustrate how real systems work.
+> ⚠️ **Note**: This is a learning/demonstration project, not intended for production use. It implements simplified versions of leader election, replication, repair, and persistence to illustrate how real systems work.
 
 ---
 
@@ -40,10 +40,10 @@ Or use the automated launcher:
 |----------|----------|
 | **Storage** | In-memory KV store, TTL support, pattern matching |
 | **Persistence** | AOF logging + periodic snapshots |
-| **Clustering** | Gossip protocol, simplified leader election |
-| **Sharding** | Consistent hashing with virtual nodes |
-| **Consistency** | Tunable levels: ANY, QUORUM, ALL, STRONG |
-| **Fault Tolerance** | Basic failover, read repair, anti-entropy (simplified) |
+| **Clustering** | Gossip membership, simplified term-based leader election |
+| **Sharding** | Consistent hashing with shard-owner write routing |
+| **Consistency** | Tunable reads (`ANY`, `QUORUM`, `ALL`, `STRONG`) and replica-set write acknowledgments |
+| **Fault Tolerance** | Basic failover, read repair, anti-entropy, fault injection |
 | **Chaos Testing** | Built-in fault injection for testing resilience |
 
 ---
@@ -69,7 +69,7 @@ These measurements validate system behavior, not production performance. See [BE
                     ▼                       ▼
             ┌─────────────┐         ┌─────────────┐
             │   NODE 1    │◄───────►│   NODE 2    │◄───────►...
-            │  (Leader)   │ Gossip  │ (Follower)  │
+            │ (Shard Peer)│ Gossip  │ (Shard Peer)│
             └──────┬──────┘         └──────┬──────┘
                    │                       │
             ┌──────┴──────┐         ┌──────┴──────┐
@@ -80,10 +80,10 @@ These measurements validate system behavior, not production performance. See [BE
 
 **Key Components:**
 - **Storage Engine** - Thread-safe HashMap with TTL and statistics
-- **Cluster Coordinator** - Gossip-based membership and Raft-lite election
+- **Cluster Coordinator** - Gossip-based membership and simplified leader election
 - **Sharding Layer** - Consistent hash ring with 150 virtual nodes
-- **Persistence** - Write-ahead AOF log + periodic snapshots
-- **Read Coordinator** - Consistency-aware reads with read repair
+- **Persistence** - Write-ahead AOF log + periodic snapshots with metadata recovery
+- **Read Coordinator** - Consistency-aware reads with deterministic read repair
 
 See [ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed design.
 
@@ -138,6 +138,9 @@ python tests/test_quick.py
 
 # Run full cluster tests
 python tests/test_cluster.py
+
+# Run failure-oriented distributed behavior tests
+python tests/test_resilience.py
 ```
 
 ---
@@ -150,8 +153,8 @@ python tests/test_cluster.py
 |---------|--------|---------------|-----------|
 | **Language** | Pure Python | C | Java |
 | **Dependencies** | None | Many | Many |
-| **Consistency** | Tunable | Eventual | Tunable |
-| **Leader Election** | Raft-lite (simplified) | Gossip | Paxos |
+| **Consistency** | Tunable reads + replica-set write acks | Eventual | Tunable |
+| **Leader Election** | Simplified term-based election | Gossip | Paxos |
 | **Sharding** | Consistent Hash | Hash Slots | Vnodes |
 | **Persistence** | AOF + Snapshot | RDB + AOF | SSTable |
 | **Use Case** | Learning/Demo | Production | Production |
@@ -160,7 +163,8 @@ python tests/test_cluster.py
 - Consistent hashing concepts (similar to Cassandra)
 - AOF persistence pattern (similar to Redis)
 - Tunable consistency trade-offs
-- Simplified leader election (inspired by Raft)
+- Shard-owner write coordination with replica-set replication
+- Simplified leader election for cluster coordination and failover demos
 
 ---
 
@@ -170,7 +174,7 @@ python tests/test_cluster.py
 |----------|-----------|
 | **Pure Python** | No dependencies, easy to understand and modify |
 | **JSON Protocol** | Human-readable, easy debugging |
-| **Raft-Lite** | Simpler than full Raft, sufficient for demo |
+| **Simplified Leader Election** | Easier to follow than full Raft, but not consensus-safe |
 | **Virtual Nodes** | Better load distribution than simple hashing |
 | **Read Repair** | Eventual consistency without background anti-entropy |
 | **In-Memory First** | Performance over durability (with optional persistence) |
@@ -202,7 +206,7 @@ See [DESIGN_DECISIONS.md](docs/DESIGN_DECISIONS.md) for detailed rationale.
 |-------|----------|
 | Connection refused | Ensure node is running on that port |
 | No leader available | Wait 2-3 seconds for election |
-| Not leader error | Connect to leader node for writes |
+| Primary owner unavailable | Check cluster health and replica availability |
 | Rate limited | Reduce request rate, retry later |
 
 See [docs/troubleshooting.md](docs/troubleshooting.md) for detailed solutions.
@@ -213,11 +217,11 @@ See [docs/troubleshooting.md](docs/troubleshooting.md) for detailed solutions.
 
 This project intentionally simplifies several aspects of production distributed systems:
 
-- **Consensus safety** - Raft-lite does not provide full safety guarantees under network partitions
-- **Split-brain prevention** - No fencing or quorum-based protection implemented
-- **Clock skew** - No handling for clock drift between nodes
-- **Crash recovery** - AOF replay may not fully recover all edge cases
-- **Scalability** - Tested with 3-10 nodes; not designed for large clusters
+- **Consensus safety** - leader election is simplified and is not a full Raft implementation
+- **Split-brain prevention** - no fencing or lease-based protection is implemented
+- **Read guarantees** - `STRONG` reads go to the key's primary owner, not a globally linearizable consensus layer
+- **Delete semantics** - delete propagation is simpler than Cassandra tombstones and compaction
+- **Scalability** - tested on small clusters; not designed for large deployments
 
 These limitations are discussed in detail in [DESIGN_DECISIONS.md](docs/DESIGN_DECISIONS.md).
 

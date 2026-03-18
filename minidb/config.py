@@ -14,7 +14,7 @@ class ConsistencyLevel(Enum):
     QUORUM = "QUORUM"     # Majority acknowledgment
     ALL = "ALL"           # All replicas acknowledge
     ANY = "ANY"           # Fire and forget
-    STRONG = "STRONG"     # Leader-only strict consistency
+    STRONG = "STRONG"     # Primary-owner read consistency
 
 
 class NodeRole(Enum):

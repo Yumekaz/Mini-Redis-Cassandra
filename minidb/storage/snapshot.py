@@ -64,11 +64,22 @@ class SnapshotPersistence:
                     "data": {}
                 }
                 
-                for key, (value, expires_at, version) in data.items():
+                for key, item in data.items():
+                    if len(item) >= 6:
+                        value, expires_at, version, created_at, updated_at, coordinator_id = item[:6]
+                    else:
+                        value, expires_at, version = item[:3]
+                        created_at = snapshot_data["timestamp"]
+                        updated_at = snapshot_data["timestamp"]
+                        coordinator_id = ""
+
                     snapshot_data["data"][key] = {
                         "v": value,
                         "e": expires_at,
-                        "ver": version
+                        "ver": version,
+                        "created_at": created_at,
+                        "updated_at": updated_at,
+                        "coordinator_id": coordinator_id
                     }
                 
                 # Write to temp file (compressed)
@@ -131,7 +142,14 @@ class SnapshotPersistence:
                 # Skip expired keys
                 if expires_at and expires_at < now:
                     continue
-                result[key] = (item["v"], expires_at, item.get("ver", 1))
+                result[key] = (
+                    item["v"],
+                    expires_at,
+                    item.get("ver", 1),
+                    item.get("created_at", snapshot_data.get("timestamp", now)),
+                    item.get("updated_at", snapshot_data.get("timestamp", now)),
+                    item.get("coordinator_id", "")
+                )
             
             return result
             

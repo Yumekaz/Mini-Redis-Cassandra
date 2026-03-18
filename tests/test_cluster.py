@@ -290,9 +290,9 @@ def test_kv_store():
 
 
 def test_raft_election():
-    """Test Raft-lite leader election."""
+    """Test simplified leader election."""
     print("\n" + "="*60)
-    print("TEST 5: Raft Leader Election")
+    print("TEST 5: Simplified Leader Election")
     print("="*60)
     
     from minidb.cluster.election import ElectionManager
@@ -325,7 +325,7 @@ def test_raft_election():
     
     election1.stop()
     
-    print("Raft election test: PASSED")
+    print("Leader election test: PASSED")
     return True
 
 
@@ -416,7 +416,7 @@ def run_all_tests():
         ("Consistent Hashing", test_consistent_hashing),
         ("Merkle Tree", test_merkle_tree),
         ("Version Vectors", test_version_vectors),
-        ("Raft Election", test_raft_election),
+        ("Leader Election", test_raft_election),
         ("Single Node", test_single_node),
         ("Cluster", test_cluster),
     ]

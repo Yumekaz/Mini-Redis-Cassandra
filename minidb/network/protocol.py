@@ -50,7 +50,7 @@ class Message:
     msg_type: MessageType
     payload: Dict[str, Any] = field(default_factory=dict)
     sender_id: str = ""
-    term: int = 0  # Raft term
+    term: int = 0  # Election term
     sequence: int = 0  # Message sequence number
     
     def encode(self) -> bytes:

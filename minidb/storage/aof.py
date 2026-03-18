@@ -28,7 +28,10 @@ class AOFEntry:
     key: str
     value: Optional[Any] = None
     ttl: Optional[int] = None
+    expires_at: Optional[float] = None
     version: int = 1
+    created_at: Optional[float] = None
+    coordinator_id: str = ""
     
     def to_line(self) -> str:
         """Convert to AOF line format."""
@@ -42,6 +45,12 @@ class AOFEntry:
             data["val"] = self.value
         if self.ttl is not None:
             data["ttl"] = self.ttl
+        if self.expires_at is not None:
+            data["exp"] = self.expires_at
+        if self.created_at is not None:
+            data["cts"] = self.created_at
+        if self.coordinator_id:
+            data["coord"] = self.coordinator_id
         return json.dumps(data)
     
     @classmethod
@@ -54,7 +63,10 @@ class AOFEntry:
             key=data["key"],
             value=data.get("val"),
             ttl=data.get("ttl"),
-            version=data.get("ver", 1)
+            expires_at=data.get("exp"),
+            version=data.get("ver", 1),
+            created_at=data.get("cts"),
+            coordinator_id=data.get("coord", "")
         )
 
 
@@ -98,8 +110,12 @@ class AOFPersistence:
         """Open AOF file for appending."""
         self._file = open(self.aof_path, "a", encoding="utf-8")
     
-    def append(self, command: AOFCommand, key: str, value: Any = None, 
-               ttl: Optional[int] = None, version: int = 1):
+    def append(self, command: AOFCommand, key: str, value: Any = None,
+               ttl: Optional[int] = None, version: int = 1,
+               expires_at: Optional[float] = None,
+               created_at: Optional[float] = None,
+               updated_at: Optional[float] = None,
+               coordinator_id: str = ""):
         """
         Append a command to the AOF.
         
@@ -111,12 +127,15 @@ class AOFPersistence:
             version: Version number for conflict resolution
         """
         entry = AOFEntry(
-            timestamp=time.time(),
+            timestamp=updated_at if updated_at is not None else time.time(),
             command=command,
             key=key,
             value=value,
             ttl=ttl,
-            version=version
+            expires_at=expires_at,
+            version=version,
+            created_at=created_at,
+            coordinator_id=coordinator_id
         )
         
         with self._lock:
@@ -195,25 +214,29 @@ class AOFPersistence:
             now = time.time()
             
             with open(temp_path, "w", encoding="utf-8") as f:
-                for key, (value, expires_at, version) in current_state.items():
+                for key, item in current_state.items():
+                    if len(item) >= 6:
+                        value, expires_at, version, created_at, updated_at, coordinator_id = item[:6]
+                    else:
+                        value, expires_at, version = item[:3]
+                        created_at = now
+                        updated_at = now
+                        coordinator_id = ""
+
                     # Skip expired keys
                     if expires_at and expires_at < now:
                         continue
-                    
-                    # Calculate remaining TTL
-                    ttl = None
-                    if expires_at:
-                        ttl = int(expires_at - now)
-                        if ttl <= 0:
-                            continue
-                    
+
                     entry = AOFEntry(
-                        timestamp=now,
+                        timestamp=updated_at,
                         command=AOFCommand.SET,
                         key=key,
                         value=value,
-                        ttl=ttl,
-                        version=version
+                        ttl=None,
+                        expires_at=expires_at,
+                        version=version,
+                        created_at=created_at,
+                        coordinator_id=coordinator_id
                     )
                     f.write(entry.to_line() + "\n")
                 f.flush()

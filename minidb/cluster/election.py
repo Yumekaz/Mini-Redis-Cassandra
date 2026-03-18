@@ -1,5 +1,5 @@
 """
-Raft-lite leader election system.
+Simplified leader election system.
 """
 
 import time
@@ -13,7 +13,7 @@ from ..config import NodeRole
 
 @dataclass
 class LogEntry:
-    """A log entry for Raft consensus."""
+    """A log entry for simplified cluster coordination."""
     term: int
     index: int
     command: str
@@ -21,6 +21,10 @@ class LogEntry:
     value: Any = None
     ttl: Optional[int] = None
     timestamp: float = 0.0
+    version: int = 1
+    expires_at: Optional[float] = None
+    created_at: Optional[float] = None
+    coordinator_id: str = ""
     
     def to_dict(self) -> Dict:
         return {
@@ -30,7 +34,11 @@ class LogEntry:
             "key": self.key,
             "value": self.value,
             "ttl": self.ttl,
-            "timestamp": self.timestamp
+            "timestamp": self.timestamp,
+            "version": self.version,
+            "expires_at": self.expires_at,
+            "created_at": self.created_at,
+            "coordinator_id": self.coordinator_id
         }
     
     @classmethod
@@ -42,13 +50,17 @@ class LogEntry:
             key=data["key"],
             value=data.get("value"),
             ttl=data.get("ttl"),
-            timestamp=data.get("timestamp", 0.0)
+            timestamp=data.get("timestamp", 0.0),
+            version=data.get("version", 1),
+            expires_at=data.get("expires_at"),
+            created_at=data.get("created_at"),
+            coordinator_id=data.get("coordinator_id", "")
         )
 
 
 class ElectionManager:
     """
-    Raft-lite election manager.
+    Simplified election manager.
     
     Features:
     - Term-based elections
@@ -66,7 +78,7 @@ class ElectionManager:
         self.election_timeout_max = election_timeout_max
         self.heartbeat_interval = heartbeat_interval
         
-        # Raft state
+        # Election state
         self.current_term = 0
         self.voted_for: Optional[str] = None
         self.role = NodeRole.FOLLOWER
@@ -96,15 +108,18 @@ class ElectionManager:
         self._request_votes: Optional[Callable[[int, int, int], int]] = None
         self._send_heartbeats: Optional[Callable[[], None]] = None
         self._apply_entry: Optional[Callable[[LogEntry], None]] = None
+        self._get_cluster_size: Optional[Callable[[], int]] = None
     
     def set_callbacks(self, on_become_leader=None, on_become_follower=None,
-                      request_votes=None, send_heartbeats=None, apply_entry=None):
+                      request_votes=None, send_heartbeats=None, apply_entry=None,
+                      get_cluster_size=None):
         """Set election callbacks."""
         self._on_become_leader = on_become_leader
         self._on_become_follower = on_become_follower
         self._request_votes = request_votes
         self._send_heartbeats = send_heartbeats
         self._apply_entry = apply_entry
+        self._get_cluster_size = get_cluster_size
     
     def _random_timeout(self) -> float:
         """Generate random election timeout."""
@@ -181,7 +196,9 @@ class ElectionManager:
             # Check if we won
             # For a cluster, we need majority
             # But for single node or if we got enough votes
-            if votes_received >= 1:  # Simplified: any votes wins
+            cluster_size = self._get_cluster_size() if self._get_cluster_size else 1
+            required_majority = max(1, cluster_size // 2 + 1)
+            if votes_received >= required_majority:
                 self._become_leader()
     
     def _become_leader(self):
@@ -218,12 +235,14 @@ class ElectionManager:
             self._last_heartbeat = time.time()
             self._election_timeout = self._random_timeout()
             
+            old_role = self.role
+            old_leader_id = self.leader_id
             if self.role != NodeRole.FOLLOWER or self.leader_id != leader_id:
                 old_role = self.role
                 self.role = NodeRole.FOLLOWER
                 self.leader_id = leader_id
                 
-                if old_role == NodeRole.LEADER and self._on_become_follower:
+                if self._on_become_follower and (old_role != NodeRole.FOLLOWER or old_leader_id != leader_id):
                     threading.Thread(
                         target=self._on_become_follower,
                         args=(leader_id,),
@@ -240,7 +259,8 @@ class ElectionManager:
                 self.role = NodeRole.FOLLOWER
                 self.leader_id = None
                 self._election_timeout = self._random_timeout()
-                self._last_heartbeat = time.time()
+                # Hold off self-election briefly so another node can win failover.
+                self._last_heartbeat = time.time() + self.election_timeout_max
                 
                 if self._on_become_follower:
                     # Notify that we stepped down (no new leader yet)
@@ -297,7 +317,7 @@ class ElectionManager:
     def append_entry(self, command: str, key: str, value: Any = None,
                     ttl: Optional[int] = None) -> Optional[LogEntry]:
         """
-        Append a new entry to the log (leader only).
+        Append a new entry to the log (when this node is the elected leader).
         
         Returns:
             The log entry if successful, None otherwise
@@ -378,7 +398,7 @@ class ElectionManager:
     
     def commit_entries(self, match_indices: Dict[str, int], cluster_size: int):
         """
-        Update commit index based on match indices (leader only).
+        Update commit index based on match indices (leader path only).
         Called after receiving replication acknowledgments.
         """
         with self._lock:

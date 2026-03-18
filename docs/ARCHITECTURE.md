@@ -2,7 +2,7 @@
 
 ## System Overview
 
-Mini-Redis/Cassandra is a distributed key-value database implementing concepts from Redis Cluster, Apache Cassandra, and etcd.
+Mini-Redis/Cassandra is an educational distributed key-value store implementing concepts from Redis Cluster, Apache Cassandra, and simplified leader-based coordination.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -19,7 +19,7 @@ Mini-Redis/Cassandra is a distributed key-value database implementing concepts f
            ▼                         ▼                         ▼
     ┌─────────────┐           ┌─────────────┐           ┌─────────────┐
     │   NODE 1    │◄─────────►│   NODE 2    │◄─────────►│   NODE 3    │
-    │  (Leader)   │  Gossip   │ (Follower)  │  Gossip   │ (Follower)  │
+    │ (Shard Peer)│  Gossip   │ (Shard Peer)│  Gossip   │ (Shard Peer)│
     └─────────────┘           └─────────────┘           └─────────────┘
            │                         │                         │
            ▼                         ▼                         ▼
@@ -35,9 +35,9 @@ Mini-Redis/Cassandra is a distributed key-value database implementing concepts f
 | Principle | Description |
 |-----------|-------------|
 | **Decentralized** | No single point of failure; any node can accept reads |
-| **Consistent** | Raft-based leader election ensures write consistency |
+| **Consistent** | Shard-owner writes use replica-set acknowledgments and deterministic version ordering |
 | **Partition-Tolerant** | System continues operating during network splits |
-| **Self-Healing** | Automatic repair of inconsistencies via anti-entropy |
+| **Self-Healing** | Automatic repair of inconsistencies via read repair and anti-entropy |
 
 ---
 
@@ -98,20 +98,20 @@ Manages cluster membership and leader election.
          ▼                 ▼                 ▼
 ┌─────────────────┐ ┌─────────────┐ ┌─────────────────┐
 │   Membership    │ │  Election   │ │  Replication    │
-│   (Gossip)      │ │  (Raft)     │ │  Manager        │
+│   (Gossip)      │ │ (Simplified)│ │  Manager        │
 └─────────────────┘ └─────────────┘ └─────────────────┘
 ```
 
 **Subcomponents:**
 - **Membership** - Gossip-based node discovery and failure detection
-- **Election** - Raft-lite leader election with terms
-- **Replication** - Leader-to-follower log replication
+- **Election** - simplified term-based leader election for cluster coordination
+- **Replication** - shard-owner replication to the key's replica set
 
 ---
 
-### 4. Leader Election (Raft-Lite)
+### 4. Simplified Leader Election
 
-Ensures exactly one leader at any time.
+Used for cluster coordination and failover demos. This is intentionally simpler than full Raft and should not be treated as consensus-safe under partitions.
 
 ```
 ┌──────────┐     timeout      ┌───────────┐    wins vote    ┌──────────┐
@@ -176,7 +176,7 @@ Tunable consistency for read operations.
 | **ANY** | Local node | Fastest | May be stale |
 | **QUORUM** | Majority (2/3) | Medium | Strong |
 | **ALL** | All nodes | Slow | Strongest |
-| **STRONG** | Leader only | Medium | Linearizable |
+| **STRONG** | Primary owner only | Medium | Primary-owner latest view |
 
 ---
 
@@ -241,15 +241,14 @@ Built-in chaos engineering for testing resilience.
 ### Write Path
 
 ```
-Client          Leader          Follower1       Follower2
+Client         Any Node       Primary Owner      Replica Nodes
    │               │                 │               │
    │──SET foo=bar─►│                 │               │
-   │               │──replicate────►│               │
-   │               │──replicate──────────────────►│
-   │               │◄─────ACK───────│               │
-   │               │◄─────ACK───────────────────────│
-   │               │ (QUORUM met)                   │
-   │◄─────OK───────│                 │               │
+   │               │──forward───────►│               │
+   │               │                 │──replicate───►│
+   │               │                 │◄────ACK───────│
+   │               │                 │ (QUORUM met)  │
+   │◄─────OK───────│◄────────────────│               │
 ```
 
 ### Read Path (QUORUM)
@@ -285,9 +284,9 @@ minidb/
 │
 ├── cluster/
 │   ├── coordinator.py    # Cluster coordination
-│   ├── election.py       # Raft-lite election
+│   ├── election.py       # Simplified leader election
 │   ├── membership.py     # Gossip protocol
-│   ├── replication.py    # Log replication
+│   ├── replication.py    # Replica-set replication
 │   └── read_coordinator.py # Consistency-aware reads
 │
 ├── sharding/

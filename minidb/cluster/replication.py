@@ -5,7 +5,7 @@ Replication manager for sync and async replication.
 import time
 import threading
 import queue
-from typing import Dict, List, Optional, Callable, Any
+from typing import Dict, List, Optional, Callable, Any, Tuple
 from dataclasses import dataclass
 from enum import Enum
 
@@ -78,15 +78,16 @@ class ReplicationManager:
         """Process async replication queue."""
         while self._running:
             try:
-                entry = self._async_queue.get(timeout=1.0)
-                self._replicate_to_followers(entry, async_mode=True)
+                entry, targets = self._async_queue.get(timeout=1.0)
+                self._replicate_to_followers(entry, targets, async_mode=True)
             except queue.Empty:
                 continue
             except Exception as e:
                 print(f"Async replication error: {e}")
     
     def replicate(self, entry: LogEntry, 
-                  consistency: Optional[ConsistencyLevel] = None) -> bool:
+                  consistency: Optional[ConsistencyLevel] = None,
+                  targets: Optional[List[str]] = None) -> bool:
         """
         Replicate a log entry according to consistency level.
         
@@ -99,34 +100,38 @@ class ReplicationManager:
         """
         consistency = consistency or self.default_consistency
         
-        if not self._get_followers:
+        if targets is None and not self._get_followers:
             return True
         
-        followers = self._get_followers()
+        followers = list(targets) if targets is not None else self._get_followers()
         
         if not followers:
             # No followers, always succeed
             return True
         
         # Calculate required acknowledgments
-        cluster_size = len(followers) + 1  # +1 for leader
+        replica_count = len(followers) + 1  # +1 for coordinator/local replica
         
         if consistency == ConsistencyLevel.ONE or consistency == ConsistencyLevel.ANY:
             # Async replication
-            self._async_queue.put(entry)
+            self._async_queue.put((entry, followers))
             return True
             
         elif consistency == ConsistencyLevel.QUORUM:
-            required_acks = cluster_size // 2  # Leader counts as one
+            required_total = replica_count // 2 + 1
             
         elif consistency == ConsistencyLevel.ALL:
-            required_acks = len(followers)
+            required_total = replica_count
             
         elif consistency == ConsistencyLevel.STRONG:
-            required_acks = len(followers)
+            required_total = replica_count
             
         else:
-            required_acks = 1
+            required_total = 1
+
+        required_acks = max(0, required_total - 1)  # local apply counts as one
+        if required_acks == 0:
+            return True
         
         # Create pending request
         request = ReplicationRequest(
@@ -140,7 +145,7 @@ class ReplicationManager:
             self._pending[entry.index] = request
         
         # Send to followers
-        self._replicate_to_followers(entry, async_mode=False)
+        self._replicate_to_followers(entry, followers, async_mode=False)
         
         # Wait for acknowledgments
         success = request.event.wait(timeout=self.replication_timeout)
@@ -151,13 +156,11 @@ class ReplicationManager:
         
         return request.success or (request.received_acks >= required_acks)
     
-    def _replicate_to_followers(self, entry: LogEntry, async_mode: bool):
+    def _replicate_to_followers(self, entry: LogEntry, followers: List[str], async_mode: bool):
         """Send replication to all followers."""
-        if not self._send_replicate or not self._get_followers:
+        if not self._send_replicate:
             return
-        
-        followers = self._get_followers()
-        
+
         for follower_id in followers:
             try:
                 success = self._send_replicate(follower_id, entry)

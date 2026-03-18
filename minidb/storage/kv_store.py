@@ -19,6 +19,7 @@ class KeyMetadata:
     updated_at: float
     expires_at: Optional[float] = None
     version: int = 1
+    coordinator_id: str = ""
     
 
 @dataclass
@@ -63,8 +64,10 @@ class KVStore:
         self._ttl_index: Dict[float, List[str]] = defaultdict(list)  # expiry_time -> keys
         self._running = True
         
-    def set(self, key: str, value: Any, ttl: Optional[int] = None, 
-            version: Optional[int] = None) -> bool:
+    def set(self, key: str, value: Any, ttl: Optional[int] = None,
+            version: Optional[int] = None, expires_at: Optional[float] = None,
+            created_at: Optional[float] = None, updated_at: Optional[float] = None,
+            coordinator_id: Optional[str] = None) -> bool:
         """
         Set a key-value pair with optional TTL.
         
@@ -79,21 +82,34 @@ class KVStore:
         """
         with self._lock:
             now = time.time()
-            expires_at = now + ttl if ttl else None
+            effective_updated_at = updated_at if updated_at is not None else now
+            effective_expires_at = expires_at
+            if effective_expires_at is None and ttl is not None:
+                effective_expires_at = effective_updated_at + ttl
             
             existing = self._store.get(key)
             new_version = version if version else (existing.version + 1 if existing else 1)
+            effective_created_at = (
+                created_at if created_at is not None
+                else (existing.created_at if existing else effective_updated_at)
+            )
+            effective_coordinator_id = (
+                coordinator_id
+                if coordinator_id is not None
+                else (existing.coordinator_id if existing else "")
+            )
             
             self._store[key] = KeyMetadata(
                 value=value,
-                created_at=existing.created_at if existing else now,
-                updated_at=now,
-                expires_at=expires_at,
-                version=new_version
+                created_at=effective_created_at,
+                updated_at=effective_updated_at,
+                expires_at=effective_expires_at,
+                version=new_version,
+                coordinator_id=effective_coordinator_id
             )
             
-            if expires_at:
-                self._ttl_index[expires_at].append(key)
+            if effective_expires_at:
+                self._ttl_index[effective_expires_at].append(key)
             
             self._stats.sets += 1
             return True
@@ -206,29 +222,45 @@ class KVStore:
             stats["memory_keys"] = sum(len(k) for k in self._store.keys())
             return stats
     
-    def get_all_data(self) -> Dict[str, Tuple[Any, Optional[float], int]]:
-        """Get all data for snapshot. Returns {key: (value, expires_at, version)}"""
+    def get_all_data(self) -> Dict[str, Tuple[Any, Optional[float], int, float, float, str]]:
+        """Get all data for persistence and migration."""
         with self._lock:
             self._cleanup_expired()
             return {
-                key: (meta.value, meta.expires_at, meta.version)
+                key: (
+                    meta.value,
+                    meta.expires_at,
+                    meta.version,
+                    meta.created_at,
+                    meta.updated_at,
+                    meta.coordinator_id
+                )
                 for key, meta in self._store.items()
             }
     
-    def load_data(self, data: Dict[str, Tuple[Any, Optional[float], int]]):
+    def load_data(self, data: Dict[str, Tuple[Any, ...]]):
         """Load data from snapshot."""
         with self._lock:
             now = time.time()
-            for key, (value, expires_at, version) in data.items():
+            for key, item in data.items():
+                if len(item) >= 6:
+                    value, expires_at, version, created_at, updated_at, coordinator_id = item[:6]
+                else:
+                    value, expires_at, version = item[:3]
+                    created_at = now
+                    updated_at = now
+                    coordinator_id = ""
+
                 # Skip expired keys
                 if expires_at and expires_at < now:
                     continue
                 self._store[key] = KeyMetadata(
                     value=value,
-                    created_at=now,
-                    updated_at=now,
+                    created_at=created_at,
+                    updated_at=updated_at,
                     expires_at=expires_at,
-                    version=version
+                    version=version,
+                    coordinator_id=coordinator_id
                 )
     
     def clear(self):

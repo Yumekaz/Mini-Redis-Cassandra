@@ -29,7 +29,7 @@ rmdir /s /q .\data\  # Windows
 
 ### Scene 1: Cluster Formation & Leader Election (25 seconds)
 
-**What this proves:** Gossip protocol, Raft-lite consensus, distributed coordination
+**What this proves:** Gossip protocol, simplified leader election, distributed coordination
 
 **Terminal 1 (Leave running):**
 ```bash
@@ -64,7 +64,7 @@ node2      localhost:7002  FOLLOWER  ALIVE
 node3      localhost:7003  FOLLOWER  ALIVE
 ```
 
-**What recruiters learn:** You implemented gossip-based cluster discovery and Raft-lite leader election.
+**What recruiters learn:** You implemented gossip-based cluster discovery and simplified leader election.
 
 ---
 
@@ -101,7 +101,7 @@ Primary: node2, Replicas: [node3, node1], Hash: 0x7f2a...
 
 **In CLI:**
 ```
-# Strong consistency - read from leader only (linearizable)
+# Strong consistency - read from the primary owner
 GET user:alice STRONG
 
 # Quorum consistency - majority must agree
@@ -270,7 +270,7 @@ export PS1='$ '   # Linux/Mac
 | Shown | What Recruiters Learn |
 |-------|----------------------|
 | `NODES` shows 3-node cluster | You built gossip-based cluster discovery |
-| Leader election in ~2-3s | You implemented Raft-lite consensus |
+| Leader election in ~2-3s | You implemented simplified leader election |
 | `ROUTE`/`REPLICAS` commands | You understand consistent hashing (Cassandra-style) |
 | `GET ... STRONG` vs `GET ... ANY` | You understand CAP theorem & tunable consistency |
 | Node kill → new leader | You built automatic failover |
@@ -293,7 +293,7 @@ After recording, structure your README like this:
 # 🗄️ Mini-Redis/Cassandra
 
 > A distributed, fault-tolerant, in-memory key-value database implementing
-> Raft consensus, consistent hashing, and tunable consistency levels.
+> simplified leader election, consistent hashing, and tunable consistency levels.
 
 ![Demo](link-to-your-gif-or-asciinema-embed)
 

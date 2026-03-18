@@ -52,11 +52,11 @@ python -m minidb.cli localhost 7001
 
 ## Data Issues
 
-### "Not leader. Redirect to..." error
+### "Primary owner unavailable" or replication failures
 
-**Cause:** Writes must go through the leader.
+**Cause:** Writes are routed to the key's primary shard owner, and that owner could be unavailable or unable to reach enough replicas.
 
-**Fix:** Connect to the leader node, or let the client handle redirects.
+**Fix:** Check node health with `NODES`, confirm the cluster has formed, and retry once the owner and enough replicas are reachable.
 
 ### Data not persisting after restart
 
@@ -75,7 +75,7 @@ python -m minidb.cli localhost 7001
 ### Slow responses
 
 **Possible causes:**
-1. High consistency level (try QUORUM instead of ALL)
+1. High consistency level (try `QUORUM` instead of `ALL`)
 2. Network latency between nodes
 3. Large number of keys
 

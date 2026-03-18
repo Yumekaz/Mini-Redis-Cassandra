@@ -20,7 +20,7 @@ class ClusterCoordinator:
     
     Combines:
     - SWIM membership management
-    - Raft-lite leader election
+    - simplified leader election
     - Log replication
     - Cluster state propagation
     """
@@ -85,7 +85,8 @@ class ClusterCoordinator:
             on_become_follower=self._on_become_follower,
             request_votes=self._request_votes,
             send_heartbeats=self._send_heartbeats,
-            apply_entry=self._on_apply_entry_internal
+            apply_entry=self._on_apply_entry_internal,
+            get_cluster_size=lambda: max(1, self.membership.node_count())
         )
         
         # Replication callbacks

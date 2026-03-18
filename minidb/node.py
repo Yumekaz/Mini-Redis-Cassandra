@@ -132,6 +132,8 @@ class DatabaseNode:
         self.router.update_node_address(self.node_id, f"{self.config.host}:{self.config.client_port}")
         self.router.set_node_health(self.node_id, True)
         self._known_ring_nodes = {self.node_id}
+        self._write_sequence = 0
+        self._write_lock = threading.RLock()
     
     def _setup_migration_callbacks(self):
         """Set up shard migration callbacks."""
@@ -148,8 +150,7 @@ class DatabaseNode:
             get_local_value=self._get_local_value_for_read,
             get_remote_value=self._get_remote_value_for_read,
             get_replicas=lambda key: self.ring.get_nodes(key, self.config.replication_factor),
-            get_leader=lambda: self.cluster.get_leader_id(),
-            is_leader=lambda: self.cluster.is_leader(),
+            get_primary_owner=lambda key: self.ring.get_node(key),
             repair_value=self._repair_value
         )
     
@@ -244,14 +245,20 @@ class DatabaseNode:
         if self.aof:
             def apply_aof_entry(entry: AOFEntry):
                 if entry.command == AOFCommand.SET:
-                    ttl = entry.ttl
-                    if entry.ttl and hasattr(entry, 'timestamp'):
-                        # Adjust TTL based on time elapsed
-                        elapsed = time.time() - entry.timestamp
-                        ttl = max(0, entry.ttl - int(elapsed))
-                        if ttl <= 0:
-                            return  # Already expired
-                    self.store.set(entry.key, entry.value, ttl, entry.version)
+                    expires_at = entry.expires_at
+                    if expires_at is None and entry.ttl and hasattr(entry, 'timestamp'):
+                        expires_at = entry.timestamp + entry.ttl
+                    if expires_at and expires_at <= time.time():
+                        return
+                    self.store.set(
+                        entry.key,
+                        entry.value,
+                        version=entry.version,
+                        expires_at=expires_at,
+                        created_at=entry.created_at,
+                        updated_at=entry.timestamp,
+                        coordinator_id=entry.coordinator_id
+                    )
                 elif entry.command == AOFCommand.DELETE:
                     self.store.delete(entry.key)
             
@@ -338,10 +345,16 @@ class DatabaseNode:
                 return self._handle_fault(args)
             elif cmd == "RATELIMIT":
                 return self._handle_ratelimit(args)
+            elif cmd == "__OWNER_WRITE":
+                return self._handle_owner_write(args)
             elif cmd == "__LOCAL_READ":
                 return self._handle_local_read(args)
+            elif cmd == "__LOCAL_KEYS":
+                return self._handle_local_keys(args)
             elif cmd == "__REPLICA_SET":
                 return self._handle_replica_set(args)
+            elif cmd == "__IMPORT_KEYS":
+                return self._handle_import_keys(args)
             else:
                 return Protocol.create_response(False, error=f"Unknown command: {cmd}")
                 
@@ -355,26 +368,12 @@ class DatabaseNode:
         
         key = args[0]
         value = args[1]
-        ttl = int(args[2]) if len(args) > 2 else None
-        
-        # Check if we're the leader (for writes)
-        if not self.cluster.is_leader():
-            leader_addr = self.cluster.get_leader_address()
-            if leader_addr:
-                return Protocol.create_response(
-                    False, 
-                    error=f"Not leader. Redirect to {leader_addr}"
-                )
-            return Protocol.create_response(False, error="No leader available")
-        
-        # Replicate and apply
-        success = self.cluster.append_and_replicate(
-            "SET", key, value, ttl, self.config.default_consistency
-        )
-        
-        if success:
-            return Protocol.create_response(True, data="OK")
-        return Protocol.create_response(False, error="Replication failed")
+        try:
+            ttl = int(args[2]) if len(args) > 2 else None
+        except ValueError:
+            return Protocol.create_response(False, error="TTL must be an integer")
+
+        return self._coordinate_or_forward_write("SET", key, value=value, ttl=ttl)
     
     def _handle_setex(self, args: List[str]) -> Message:
         """Handle SETEX command."""
@@ -387,25 +386,8 @@ class DatabaseNode:
         except ValueError:
             return Protocol.create_response(False, error="TTL must be an integer")
         value = args[2]
-        
-        # Check if we're the leader
-        if not self.cluster.is_leader():
-            leader_addr = self.cluster.get_leader_address()
-            if leader_addr:
-                return Protocol.create_response(
-                    False, 
-                    error=f"Not leader. Redirect to {leader_addr}"
-                )
-            return Protocol.create_response(False, error="No leader available")
-        
-        # Replicate and apply
-        success = self.cluster.append_and_replicate(
-            "SET", key, value, ttl, self.config.default_consistency
-        )
-        
-        if success:
-            return Protocol.create_response(True, data="OK")
-        return Protocol.create_response(False, error="Replication failed")
+
+        return self._coordinate_or_forward_write("SET", key, value=value, ttl=ttl)
     
     def _handle_get(self, args: List[str]) -> Message:
         """Handle GET command with consistency levels."""
@@ -435,23 +417,102 @@ class DatabaseNode:
             return Protocol.create_response(False, error="DELETE requires key")
         
         key = args[0]
-        
-        if not self.cluster.is_leader():
-            leader_addr = self.cluster.get_leader_address()
-            if leader_addr:
-                return Protocol.create_response(
-                    False,
-                    error=f"Not leader. Redirect to {leader_addr}"
+
+        return self._coordinate_or_forward_write("DELETE", key)
+
+    def _coordinate_or_forward_write(self, operation: str, key: str,
+                                     value: Any = None,
+                                     ttl: Optional[int] = None) -> Message:
+        """Route a write to the key's primary owner and coordinate replication there."""
+        primary_owner = self.ring.get_node(key)
+        if not primary_owner:
+            return Protocol.create_response(False, error=f"No shard owner available for key: {key}")
+
+        if primary_owner != self.node_id:
+            return self._forward_write(primary_owner, operation, key, value=value, ttl=ttl)
+
+        return self._apply_partition_write(operation, key, value=value, ttl=ttl)
+
+    def _forward_write(self, node_id: str, operation: str, key: str,
+                       value: Any = None,
+                       ttl: Optional[int] = None) -> Message:
+        """Forward a write to the primary owner."""
+        node = self.cluster.membership.get_node(node_id)
+        if not node or node.state != NodeState.ALIVE:
+            return Protocol.create_response(False, error=f"Primary owner unavailable for key: {key}")
+
+        try:
+            from .network.client import TCPClient
+            client = TCPClient(node.host, node.client_port, timeout=10.0)
+            if not client.connect():
+                return Protocol.create_response(False, error=f"Failed to reach primary owner {node_id}")
+
+            if operation == "SET":
+                response = client.send_command(
+                    "__OWNER_WRITE",
+                    operation,
+                    key,
+                    json.dumps(value),
+                    "" if ttl is None else str(ttl)
                 )
-            return Protocol.create_response(False, error="No leader available")
-        
-        success = self.cluster.append_and_replicate(
-            "DELETE", key, None, None, self.config.default_consistency
+            else:
+                response = client.send_command("__OWNER_WRITE", operation, key)
+
+            client.disconnect()
+            if response:
+                return response
+        except Exception:
+            pass
+
+        return Protocol.create_response(False, error=f"Failed to forward write for key: {key}")
+
+    def _apply_partition_write(self, operation: str, key: str,
+                               value: Any = None,
+                               ttl: Optional[int] = None) -> Message:
+        """Coordinate a write for the key's replica set from the primary owner."""
+        primary_owner = self.ring.get_node(key)
+        if primary_owner != self.node_id:
+            return Protocol.create_response(False, error=f"This node is not the primary owner for {key}")
+
+        replicas = self.ring.get_nodes(key, self.config.replication_factor)
+        if self.node_id not in replicas:
+            replicas = [self.node_id] + replicas
+
+        with self._write_lock:
+            current = self.store.get_with_metadata(key)
+            version = (current.version + 1) if current else 1
+            now = time.time() + self.fault_injector.get_clock_skew()
+            created_at = current.created_at if current else now
+            expires_at = now + ttl if ttl is not None else None
+            entry = LogEntry(
+                term=self.cluster.election.current_term,
+                index=self._next_write_index(),
+                command=operation,
+                key=key,
+                value=value,
+                ttl=ttl,
+                timestamp=now,
+                version=version,
+                expires_at=expires_at,
+                created_at=created_at,
+                coordinator_id=self.node_id
+            )
+
+            remote_replicas = [replica for replica in replicas if replica != self.node_id]
+            success = self.cluster.replication.replicate(
+                entry,
+                self.config.default_consistency,
+                targets=remote_replicas
+            )
+
+            if success:
+                self._apply_log_entry(entry)
+                return Protocol.create_response(True, data="OK")
+
+        return Protocol.create_response(
+            False,
+            error=f"Replication failed for {operation} on replica set {replicas}"
         )
-        
-        if success:
-            return Protocol.create_response(True, data="OK")
-        return Protocol.create_response(False, error="Replication failed")
     
     def _handle_exists(self, args: List[str]) -> Message:
         """Handle EXISTS command."""
@@ -459,13 +520,13 @@ class DatabaseNode:
             return Protocol.create_response(False, error="EXISTS requires key")
         
         key = args[0]
-        exists = self.store.exists(key)
+        _, exists, _ = self.read_coordinator.read(key, ConsistencyLevel.ANY)
         return Protocol.create_response(True, data=1 if exists else 0)
     
     def _handle_keys(self, args: List[str]) -> Message:
         """Handle KEYS command."""
         pattern = args[0] if args else "*"
-        keys = self.store.keys(pattern)
+        keys = sorted(self._collect_cluster_keys(pattern))
         return Protocol.create_response(True, data=keys)
     
     def _handle_info(self, args: Optional[List[str]] = None) -> Message:
@@ -546,8 +607,7 @@ class DatabaseNode:
     
     def _handle_shards(self) -> Message:
         """Handle SHARDS command."""
-        # Get key distribution across nodes
-        all_keys = list(self.store.keys("*"))
+        all_keys = sorted(self._collect_cluster_keys("*"))
         distribution = self.ring.get_key_distribution(all_keys)
         
         return Protocol.create_response(True, data={
@@ -700,6 +760,41 @@ class DatabaseNode:
         """Handle RATELIMIT command."""
         return Protocol.create_response(True, data=self.backpressure.get_stats())
 
+    def _handle_owner_write(self, args: List[str]) -> Message:
+        """Handle an internal write already routed to the primary owner."""
+        if len(args) < 2:
+            return Protocol.create_response(False, error="__OWNER_WRITE requires command and key")
+
+        operation = args[0].upper()
+        key = args[1]
+        value = None
+        ttl = None
+
+        if operation == "SET":
+            if len(args) < 3:
+                return Protocol.create_response(False, error="SET requires value")
+            try:
+                value = json.loads(args[2])
+            except json.JSONDecodeError:
+                value = args[2]
+
+            if len(args) > 3 and args[3] not in ("", "None", "null"):
+                try:
+                    ttl = int(args[3])
+                except ValueError:
+                    return Protocol.create_response(False, error="TTL must be an integer")
+        elif operation != "DELETE":
+            return Protocol.create_response(False, error=f"Unsupported owner write: {operation}")
+
+        primary_owner = self.ring.get_node(key)
+        if primary_owner != self.node_id:
+            return Protocol.create_response(
+                False,
+                error=f"Owner mismatch for key {key}: expected {primary_owner}, got {self.node_id}"
+            )
+
+        return self._apply_partition_write(operation, key, value=value, ttl=ttl)
+
     def _handle_local_read(self, args: List[str]) -> Message:
         """Handle an internal local-only read with metadata."""
         if not args:
@@ -711,22 +806,33 @@ class DatabaseNode:
                 "found": False,
                 "value": None,
                 "version": 0,
-                "expires_at": None
+                "expires_at": None,
+                "updated_at": 0.0,
+                "created_at": 0.0,
+                "coordinator_id": ""
             })
 
         return Protocol.create_response(True, data={
             "found": True,
             "value": metadata.value,
             "version": metadata.version,
-            "expires_at": metadata.expires_at
+            "expires_at": metadata.expires_at,
+            "updated_at": metadata.updated_at,
+            "created_at": metadata.created_at,
+            "coordinator_id": metadata.coordinator_id
         })
 
+    def _handle_local_keys(self, args: List[str]) -> Message:
+        """Return only local keys for internal fan-out commands."""
+        pattern = args[0] if args else "*"
+        return Protocol.create_response(True, data=self.store.keys(pattern))
+
     def _handle_replica_set(self, args: List[str]) -> Message:
-        """Apply a repaired replica value without leader redirection."""
-        if len(args) < 3:
+        """Apply a replica value without owner rerouting."""
+        if len(args) < 6:
             return Protocol.create_response(
                 False,
-                error="__REPLICA_SET requires key, value, and version"
+                error="__REPLICA_SET requires key, value, version, updated_at, created_at, and coordinator_id"
             )
 
         key = args[0]
@@ -741,16 +847,134 @@ class DatabaseNode:
         except ValueError:
             return Protocol.create_response(False, error="Version must be an integer")
 
-        ttl = None
-        if len(args) > 3 and args[3] not in ("", "None", "null"):
+        expires_at = None
+        if args[3] not in ("", "None", "null"):
             try:
                 expires_at = float(args[3])
-                ttl = max(0, int(expires_at - time.time()))
             except ValueError:
-                ttl = None
+                expires_at = None
 
-        self.store.set(key, value, ttl=ttl, version=version)
+        try:
+            updated_at = float(args[4])
+            created_at = float(args[5])
+        except ValueError:
+            return Protocol.create_response(False, error="Timestamps must be numeric")
+
+        coordinator_id = args[6] if len(args) > 6 else ""
+        current = self.store.get_with_metadata(key)
+        current_order = self._metadata_sort_key(current) if current else (0, 0.0, "")
+        incoming_order = (version, updated_at, coordinator_id)
+        if current and incoming_order < current_order:
+            return Protocol.create_response(True, data="IGNORED")
+
+        self.store.set(
+            key,
+            value,
+            version=version,
+            expires_at=expires_at,
+            created_at=created_at,
+            updated_at=updated_at,
+            coordinator_id=coordinator_id
+        )
+        if self.aof:
+            self.aof.append(
+                AOFCommand.SET,
+                key,
+                value,
+                version=version,
+                expires_at=expires_at,
+                created_at=created_at,
+                updated_at=updated_at,
+                coordinator_id=coordinator_id
+            )
         return Protocol.create_response(True, data="OK")
+
+    def _handle_import_keys(self, args: List[str]) -> Message:
+        """Bulk import migrated keys with preserved metadata."""
+        if not args:
+            return Protocol.create_response(False, error="__IMPORT_KEYS requires a payload")
+
+        try:
+            payload = json.loads(args[0])
+        except json.JSONDecodeError:
+            return Protocol.create_response(False, error="Invalid import payload")
+
+        imported = 0
+        skipped = 0
+        fanout_items = []
+
+        for key, item in payload.items():
+            version = int(item["version"])
+            updated_at = float(item.get("updated_at") or time.time())
+            created_at = float(item.get("created_at") or updated_at)
+            expires_at = item.get("expires_at")
+            coordinator_id = item.get("coordinator_id", "")
+
+            current = self.store.get_with_metadata(key)
+            current_order = self._metadata_sort_key(current) if current else (0, 0.0, "")
+            incoming_order = (version, updated_at, coordinator_id)
+            if current and incoming_order < current_order:
+                skipped += 1
+                continue
+
+            self.store.set(
+                key,
+                item["value"],
+                version=version,
+                expires_at=expires_at,
+                created_at=created_at,
+                updated_at=updated_at,
+                coordinator_id=coordinator_id
+            )
+            if self.aof:
+                self.aof.append(
+                    AOFCommand.SET,
+                    key,
+                    item["value"],
+                    version=version,
+                    expires_at=expires_at,
+                    created_at=created_at,
+                    updated_at=updated_at,
+                    coordinator_id=coordinator_id
+                )
+            imported += 1
+
+            if self.ring.get_node(key) == self.node_id:
+                fanout_items.append(
+                    {
+                        "key": key,
+                        "value": item["value"],
+                        "version": version,
+                        "expires_at": expires_at,
+                        "updated_at": updated_at,
+                        "created_at": created_at,
+                        "coordinator_id": coordinator_id,
+                    }
+                )
+
+        replicated = 0
+        for item in fanout_items:
+            targets = [
+                replica for replica in self.ring.get_nodes(item["key"], self.config.replication_factor)
+                if replica != self.node_id
+            ]
+            replicated += self._replicate_value_to_nodes(
+                item["key"],
+                item["value"],
+                item["version"],
+                {
+                    "expires_at": item["expires_at"],
+                    "updated_at": item["updated_at"],
+                    "created_at": item["created_at"],
+                    "coordinator_id": item["coordinator_id"],
+                },
+                targets
+            )
+
+        return Protocol.create_response(
+            True,
+            data={"imported": imported, "skipped": skipped, "replicated": replicated}
+        )
     
     
     def _handle_cluster_message(self, message: Message, client_socket: socket.socket) -> Optional[Message]:
@@ -768,38 +992,101 @@ class DatabaseNode:
     def _apply_log_entry(self, entry: LogEntry):
         """Apply a committed log entry to the store."""
         if entry.command == "SET":
-            self.store.set(entry.key, entry.value, entry.ttl)
+            self.store.set(
+                entry.key,
+                entry.value,
+                version=entry.version,
+                expires_at=entry.expires_at,
+                created_at=entry.created_at,
+                updated_at=entry.timestamp,
+                coordinator_id=entry.coordinator_id
+            )
             if self.aof:
-                self.aof.append(AOFCommand.SET, entry.key, entry.value, entry.ttl)
+                self.aof.append(
+                    AOFCommand.SET,
+                    entry.key,
+                    entry.value,
+                    ttl=entry.ttl,
+                    version=entry.version,
+                    expires_at=entry.expires_at,
+                    created_at=entry.created_at,
+                    updated_at=entry.timestamp,
+                    coordinator_id=entry.coordinator_id
+                )
         elif entry.command == "DELETE":
             self.store.delete(entry.key)
             if self.aof:
-                self.aof.append(AOFCommand.DELETE, entry.key)
+                self.aof.append(
+                    AOFCommand.DELETE,
+                    entry.key,
+                    version=entry.version,
+                    updated_at=entry.timestamp,
+                    coordinator_id=entry.coordinator_id
+                )
     
     def _get_data_for_repair(self) -> Dict[str, Tuple]:
         """Get data for anti-entropy repair."""
         data = self.store.get_all_data()
         return {k: (v[0], v[2]) for k, v in data.items()}  # key -> (value, version)
     
-    def _apply_repair_data(self, key: str, value: Any, version: int):
+    def _apply_repair_data(self, key: str, value: Any, version: int,
+                           metadata: Optional[Dict[str, Any]] = None):
         """Apply repaired data from another node."""
-        current_version = self.store.get_version(key)
-        if current_version is None or version > current_version:
-            self.store.set(key, value, version=version)
-            if self.aof:
-                self.aof.append(AOFCommand.SET, key, value, version=version)
+        metadata = metadata or {}
+        current = self.store.get_with_metadata(key)
+        updated_at = float(metadata.get("updated_at") or time.time())
+        created_at = float(metadata.get("created_at") or updated_at)
+        expires_at = metadata.get("expires_at")
+        coordinator_id = metadata.get("coordinator_id", self.node_id)
+
+        current_order = self._metadata_sort_key(current) if current else (0, 0.0, "")
+        incoming_order = (version, updated_at, coordinator_id)
+        if current and incoming_order < current_order:
+            return
+
+        self.store.set(
+            key,
+            value,
+            version=version,
+            expires_at=expires_at,
+            created_at=created_at,
+            updated_at=updated_at,
+            coordinator_id=coordinator_id
+        )
+        if self.aof:
+            self.aof.append(
+                AOFCommand.SET,
+                key,
+                value,
+                version=version,
+                expires_at=expires_at,
+                created_at=created_at,
+                updated_at=updated_at,
+                coordinator_id=coordinator_id
+            )
     
-    def _get_local_value_for_read(self, key: str) -> Tuple[Any, int, bool]:
+    def _get_local_value_for_read(self, key: str) -> Tuple[Any, int, bool, Dict[str, Any]]:
         """Get local value for read coordinator."""
-        value, found = self.store.get(key)
-        version = self.store.get_version(key) or 0
-        return value, version, found
+        metadata = self.store.get_with_metadata(key)
+        if metadata is None:
+            return None, 0, False, {"updated_at": 0.0, "coordinator_id": "", "created_at": 0.0}
+        return (
+            metadata.value,
+            metadata.version,
+            True,
+            {
+                "updated_at": metadata.updated_at,
+                "coordinator_id": metadata.coordinator_id,
+                "expires_at": metadata.expires_at,
+                "created_at": metadata.created_at
+            }
+        )
     
-    def _get_remote_value_for_read(self, key: str, node_id: str) -> Tuple[Any, int, bool]:
+    def _get_remote_value_for_read(self, key: str, node_id: str) -> Tuple[Any, int, bool, Dict[str, Any]]:
         """Get remote value for read coordinator."""
         node = self.cluster.membership.get_node(node_id)
         if not node:
-            return None, 0, False
+            return None, 0, False, {"updated_at": 0.0, "coordinator_id": "", "created_at": 0.0}
         
         try:
             from .network.client import TCPClient
@@ -812,40 +1099,47 @@ class DatabaseNode:
                     return (
                         data.get("value"),
                         int(data.get("version", 0)),
-                        bool(data.get("found"))
+                        bool(data.get("found")),
+                        {
+                            "updated_at": float(data.get("updated_at", 0.0)),
+                            "coordinator_id": data.get("coordinator_id", ""),
+                            "expires_at": data.get("expires_at"),
+                            "created_at": float(data.get("created_at", 0.0))
+                        }
                     )
         except Exception:
             pass
         
-        return None, 0, False
+        return None, 0, False, {"updated_at": 0.0, "coordinator_id": "", "created_at": 0.0}
     
-    def _repair_value(self, key: str, value: Any, version: int, target_node_id: Optional[str] = None):
+    def _repair_value(self, key: str, value: Any, version: int,
+                      target_node_id: Optional[str] = None,
+                      metadata: Optional[Dict[str, Any]] = None):
         """Repair a stale value locally or on a remote replica."""
+        metadata = dict(metadata or {})
         if not target_node_id or target_node_id == self.node_id:
-            self._apply_repair_data(key, value, version)
+            self._apply_repair_data(key, value, version, metadata)
             return
 
-        node = self.cluster.membership.get_node(target_node_id)
-        if not node:
-            return
+        if not metadata:
+            current = self.store.get_with_metadata(key)
+            if current:
+                metadata = {
+                    "updated_at": current.updated_at,
+                    "created_at": current.created_at,
+                    "expires_at": current.expires_at,
+                    "coordinator_id": current.coordinator_id or self.node_id,
+                }
+            else:
+                now = time.time()
+                metadata = {
+                    "updated_at": now,
+                    "created_at": now,
+                    "expires_at": None,
+                    "coordinator_id": self.node_id,
+                }
 
-        metadata = self.store.get_with_metadata(key)
-        expires_at = metadata.expires_at if metadata else None
-
-        try:
-            from .network.client import TCPClient
-            client = TCPClient(node.host, node.client_port, timeout=5.0)
-            if client.connect():
-                client.send_command(
-                    "__REPLICA_SET",
-                    key,
-                    json.dumps(value),
-                    str(version),
-                    "" if expires_at is None else str(expires_at)
-                )
-                client.disconnect()
-        except Exception:
-            pass
+        self._replicate_value_to_nodes(key, value, version, metadata, [target_node_id])
 
     def _sync_topology(self):
         """Synchronize ring and routing metadata with cluster membership."""
@@ -879,6 +1173,82 @@ class DatabaseNode:
             self.migration.on_node_leave(node_id)
 
         self._known_ring_nodes = active_node_ids
+
+    def _collect_cluster_keys(self, pattern: str) -> List[str]:
+        """Collect matching keys from all alive nodes and de-duplicate them."""
+        keys = set(self.store.keys(pattern))
+
+        for node in self.cluster.membership.get_alive_nodes():
+            if node.node_id == self.node_id:
+                continue
+
+            try:
+                from .network.client import TCPClient
+                client = TCPClient(node.host, node.client_port, timeout=5.0)
+                if client.connect():
+                    response = client.send_command("__LOCAL_KEYS", pattern)
+                    client.disconnect()
+                    if response and response.payload.get("success"):
+                        keys.update(response.payload.get("data", []))
+            except Exception:
+                pass
+
+        return sorted(keys)
+
+    def _next_write_index(self) -> int:
+        """Return the next local write sequence number."""
+        with self._write_lock:
+            self._write_sequence += 1
+            return self._write_sequence
+
+    @staticmethod
+    def _metadata_sort_key(metadata) -> Tuple[int, float, str]:
+        """Order metadata deterministically."""
+        return (
+            metadata.version,
+            metadata.updated_at,
+            metadata.coordinator_id or ""
+        )
+
+    def _replicate_value_to_nodes(self, key: str, value: Any, version: int,
+                                  metadata: Dict[str, Any],
+                                  target_nodes: List[str]) -> int:
+        """Replicate an explicit value and metadata to a set of replica nodes."""
+        replicated = 0
+        expires_at = metadata.get("expires_at")
+        updated_at = float(metadata.get("updated_at", time.time()))
+        created_at = float(metadata.get("created_at", updated_at))
+        coordinator_id = metadata.get("coordinator_id", self.node_id)
+
+        for node_id in target_nodes:
+            if node_id == self.node_id:
+                continue
+
+            node = self.cluster.membership.get_node(node_id)
+            if not node or node.state != NodeState.ALIVE:
+                continue
+
+            try:
+                from .network.client import TCPClient
+                client = TCPClient(node.host, node.client_port, timeout=5.0)
+                if client.connect():
+                    response = client.send_command(
+                        "__REPLICA_SET",
+                        key,
+                        json.dumps(value),
+                        str(version),
+                        "" if expires_at is None else str(expires_at),
+                        str(updated_at),
+                        str(created_at),
+                        coordinator_id
+                    )
+                    client.disconnect()
+                    if response and response.payload.get("success"):
+                        replicated += 1
+            except Exception:
+                pass
+
+        return replicated
     
     def _send_migration_keys(self, target_node: str, keys_data: Dict[str, Any]) -> bool:
         """Send migrated keys to target node."""
@@ -890,11 +1260,33 @@ class DatabaseNode:
             from .network.client import TCPClient
             client = TCPClient(node.host, node.client_port, timeout=30.0)
             if client.connect():
+                payload = {}
                 for key, data in keys_data.items():
-                    value = data[0] if isinstance(data, tuple) else data
-                    response = client.send_command("SET", key, str(value))
+                    if isinstance(data, tuple) and len(data) >= 6:
+                        value, expires_at, version, created_at, updated_at, coordinator_id = data[:6]
+                    elif isinstance(data, tuple) and len(data) >= 3:
+                        value, expires_at, version = data[:3]
+                        created_at = updated_at = time.time()
+                        coordinator_id = self.node_id
+                    else:
+                        value = data
+                        expires_at = None
+                        version = 1
+                        created_at = updated_at = time.time()
+                        coordinator_id = self.node_id
+
+                    payload[key] = {
+                        "value": value,
+                        "expires_at": expires_at,
+                        "version": version,
+                        "created_at": created_at,
+                        "updated_at": updated_at,
+                        "coordinator_id": coordinator_id
+                    }
+
+                response = client.send_command("__IMPORT_KEYS", json.dumps(payload))
                 client.disconnect()
-                return True
+                return bool(response and response.payload.get("success"))
         except Exception:
             pass
         
@@ -903,14 +1295,48 @@ class DatabaseNode:
     def _receive_migration_keys(self, keys_data: Dict[str, Any]) -> bool:
         """Receive migrated keys."""
         for key, data in keys_data.items():
-            value = data[0] if isinstance(data, tuple) else data
-            self.store.set(key, value)
+            if isinstance(data, tuple) and len(data) >= 6:
+                value, expires_at, version, created_at, updated_at, coordinator_id = data[:6]
+                self.store.set(
+                    key,
+                    value,
+                    version=version,
+                    expires_at=expires_at,
+                    created_at=created_at,
+                    updated_at=updated_at,
+                    coordinator_id=coordinator_id
+                )
+                if self.aof:
+                    self.aof.append(
+                        AOFCommand.SET,
+                        key,
+                        value,
+                        version=version,
+                        expires_at=expires_at,
+                        created_at=created_at,
+                        updated_at=updated_at,
+                        coordinator_id=coordinator_id
+                    )
+            else:
+                value = data[0] if isinstance(data, tuple) else data
+                self.store.set(key, value)
+                if self.aof:
+                    self.aof.append(AOFCommand.SET, key, value)
         return True
     
     def _delete_migrated_keys(self, keys: List[str]):
         """Delete migrated keys after successful transfer."""
         for key in keys:
+            metadata = self.store.get_with_metadata(key)
             self.store.delete(key)
+            if self.aof:
+                self.aof.append(
+                    AOFCommand.DELETE,
+                    key,
+                    version=metadata.version if metadata else 1,
+                    updated_at=time.time(),
+                    coordinator_id=metadata.coordinator_id if metadata else self.node_id
+                )
     
     def _handle_leader_kill(self):
         """Handle leader kill fault."""

@@ -5,9 +5,13 @@ This exercises both network-facing commands and local CLI helpers so we catch
 regressions where commands exist in docs but are not actually wired up.
 """
 
+import os
+import sys
 import shutil
 import time
 from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from minidb.cli import DatabaseCLI
 from minidb.network.client import TCPClient
@@ -65,6 +69,15 @@ def build_cluster(replication_factor=3):
 
 
 def stop_cluster(nodes):
+    for node in nodes:
+        try:
+            node.cluster.election._running = False
+            node.cluster.replication._running = False
+            node.cluster.membership._running = False
+            node._running = False
+        except Exception:
+            pass
+
     for node in nodes:
         try:
             node.stop()
@@ -154,7 +167,8 @@ def test_network_commands_and_failover():
         ratelimit = assert_success(leader_client.send_command("RATELIMIT"), "RATELIMIT")
         assert "rate_limiter" in ratelimit
 
-        assert "Not leader" in follower_client.send_command("SET", "bad", "write").payload.get("error", "")
+        assert_success(follower_client.send_command("SET", "forwarded:key", "write"), "forwarded SET") == "OK"
+        assert assert_success(leader_client.send_command("GET", "forwarded:key", "QUORUM"), "forwarded GET") == "write"
 
         assert_success(leader_client.send_command("FAULT", "ENABLE"), "FAULT ENABLE")
         assert_success(leader_client.send_command("FAULT", "DELAY", "5"), "FAULT DELAY")

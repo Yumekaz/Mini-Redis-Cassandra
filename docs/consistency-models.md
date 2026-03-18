@@ -1,21 +1,21 @@
 # Consistency Models
 
-Mini-Redis/Cassandra supports tunable consistency levels for read operations, allowing you to balance between performance and data freshness.
+Mini-Redis/Cassandra supports tunable consistency levels for read operations, allowing you to balance performance and freshness across a key's replica set.
 
 ## Overview
 
 | Level | Reads From | Latency | Consistency | Use Case |
 |-------|------------|---------|-------------|----------|
-| **ANY** | Local node | Fastest | Lowest | Caching, analytics |
+| **ANY** | Local replica or first reachable replica | Fastest | Lowest | Caching, analytics |
 | **QUORUM** | Majority | Medium | High | General purpose |
 | **ALL** | All nodes | Slow | Highest | Critical data |
-| **STRONG** | Leader only | Medium | Linearizable | Financial transactions |
+| **STRONG** | Primary owner | Medium | Primary-owner latest view | Owner-directed reads |
 
 ---
 
 ## ANY Consistency
 
-**Behavior:** Read from the local node only.
+**Behavior:** Read from the local replica when possible, otherwise the first reachable replica.
 
 ```
 minidb:7001> CONSISTENCY ANY
@@ -57,7 +57,7 @@ For a 3-node cluster with replication factor 3:
 
 ## ALL Consistency
 
-**Behavior:** Read from all replica nodes.
+**Behavior:** Read from all replicas for the key.
 
 ```
 minidb:7001> CONSISTENCY ALL
@@ -75,7 +75,7 @@ minidb:7001> GET mykey
 
 ## STRONG Consistency
 
-**Behavior:** Read only from the current leader.
+**Behavior:** Read only from the key's current primary owner in the hash ring.
 
 ```
 minidb:7001> CONSISTENCY STRONG
@@ -83,12 +83,12 @@ minidb:7001> GET mykey
 ```
 
 **Trade-offs:**
-- ✅ Linearizable - always returns the latest committed value
-- ✅ Simple mental model
-- ❌ Single point of read (leader)
-- ❌ Fails if leader is down
+- ✅ Reads from the shard owner that coordinates writes for that key
+- ✅ Avoids comparing multiple replica responses
+- ❌ Not a globally linearizable consensus read
+- ❌ Fails if the primary owner is down
 
-**Best for:** Financial transactions, counters, any operation requiring linearizability.
+**Best for:** Cases where you want the key's primary owner view without paying for a quorum read.
 
 ---
 
@@ -96,7 +96,7 @@ minidb:7001> GET mykey
 
 When reading with QUORUM or ALL consistency, if nodes have different values:
 
-1. Mini-Redis/Cassandra compares version vectors
+1. Mini-Redis/Cassandra compares `(version, updated_at, coordinator_id)`
 2. The newest version is returned to the client
 3. Stale nodes are updated in the background (read repair)
 
@@ -121,4 +121,4 @@ minidb:7001> GET mykey STRONG
 
 ## Write Consistency
 
-All writes go through the leader and are replicated to followers before acknowledgment. The write quorum is determined by the cluster configuration.
+Writes are routed to the key's primary owner and replicated only to that key's replica set. The number of acknowledgments required depends on the node's configured default consistency level (`ONE`, `ANY`, `QUORUM`, `ALL`, or `STRONG`).
