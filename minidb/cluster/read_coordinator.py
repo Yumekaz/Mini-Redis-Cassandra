@@ -69,7 +69,7 @@ class ReadCoordinator:
         self._get_replicas: Optional[Callable[[str], List[str]]] = None
         self._get_leader: Optional[Callable[[], Optional[str]]] = None
         self._is_leader: Optional[Callable[[], bool]] = None
-        self._repair_value: Optional[Callable[[str, Any, int], None]] = None
+        self._repair_value: Optional[Callable[[str, Any, int, Optional[str]], None]] = None
     
     def set_callbacks(self, get_local_value=None, get_remote_value=None,
                       get_replicas=None, get_leader=None, is_leader=None,
@@ -302,7 +302,12 @@ class ReadCoordinator:
             if result.version < best_result.version:
                 # Repair this replica
                 try:
-                    self._repair_value(key, best_result.value, best_result.version)
+                    self._repair_value(
+                        key,
+                        best_result.value,
+                        best_result.version,
+                        result.node_id
+                    )
                 except Exception:
                     pass
     

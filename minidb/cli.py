@@ -20,16 +20,17 @@ class DatabaseCLI:
     Interactive command-line interface for the database.
     
     Supports extended commands:
-    - Basic: SET, GET, DELETE, EXISTS, KEYS, PING
+    - Basic: SET, SETEX, GET, DELETE, EXISTS, KEYS, PING
     - Cluster: NODES, LEADER, RING, SHARDS, REPLICAS
     - Info: INFO, STATS, CONSISTENCY
-    - Admin: REBALANCE, FAILOVER, DEBUG
+    - Admin: REBALANCE, FAILOVER, FAULT, RATELIMIT, DEBUG
     """
     
     COMMANDS = {
         # Basic commands
         "SET": "SET <key> <value> [ttl] - Set a key-value pair",
-        "GET": "GET <key> [consistency] - Get a value (consistency: ONE|QUORUM|ALL|STRONG)",
+        "SETEX": "SETEX <key> <ttl> <value> - Set a key with explicit TTL",
+        "GET": "GET <key> [consistency] - Get a value (consistency: ONE|ANY|QUORUM|ALL|STRONG)",
         "DELETE": "DELETE <key> - Delete a key",
         "DEL": "DEL <key> - Alias for DELETE",
         "EXISTS": "EXISTS <key> - Check if key exists",
@@ -54,6 +55,8 @@ class DatabaseCLI:
         "REBALANCE": "REBALANCE - Trigger cluster rebalance",
         "MIGRATE": "MIGRATE STATUS - Show migration status",
         "FAILOVER": "FAILOVER - Force leader election",
+        "FAULT": "FAULT [action] - Manage fault injection",
+        "RATELIMIT": "RATELIMIT - Show rate limit statistics",
         "DEBUG": "DEBUG <on|off> - Toggle debug mode",
         
         # Help

@@ -238,8 +238,8 @@ def main():
         print("  ALL TESTS PASSED - Project is ready!")
         print("  ")
         print("  Next steps:")
-        print("    python demo_cluster.py      # Run basic demo")
-        print("    python failure_demo.py      # Run full demo")
+        print("    python examples/demo_cluster.py      # Run basic demo")
+        print("    python examples/failure_demo.py      # Run full demo")
     else:
         print("  SOME TESTS FAILED - Please fix the issues above")
     print("="*60 + "\n")

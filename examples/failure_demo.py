@@ -21,7 +21,7 @@ Features Demonstrated:
 11. Rate Limiting (Token bucket, backpressure)
 12. Shard Migration (Rebalancing on topology changes)
 
-Run with: python failure_demo.py
+Run with: python examples/failure_demo.py
 """
 
 import time

@@ -2,12 +2,13 @@
 Main database node implementation.
 """
 
+import json
 import time
 import threading
 import socket
 from typing import Dict, List, Optional, Any, Tuple
 
-from .config import NodeConfig, ConsistencyLevel, NodeRole
+from .config import NodeConfig, ConsistencyLevel, NodeRole, NodeState
 from .storage import KVStore, AOFPersistence, SnapshotPersistence
 from .storage.aof import AOFCommand, AOFEntry
 from .network import TCPServer, Protocol, Message, MessageType
@@ -128,6 +129,9 @@ class DatabaseNode:
         
         # Add self to ring
         self.ring.add_node(config.node_id)
+        self.router.update_node_address(self.node_id, f"{self.config.host}:{self.config.client_port}")
+        self.router.set_node_health(self.node_id, True)
+        self._known_ring_nodes = {self.node_id}
     
     def _setup_migration_callbacks(self):
         """Set up shard migration callbacks."""
@@ -178,6 +182,7 @@ class DatabaseNode:
         
         # Start cluster coordinator
         self.cluster.start()
+        self._sync_topology()
         
         # Start anti-entropy
         self.repair.start()
@@ -259,6 +264,7 @@ class DatabaseNode:
             try:
                 # TTL cleanup
                 self.store.cleanup_expired_keys()
+                self._sync_topology()
                 
                 # Periodic snapshot
                 if self.snapshot and self.snapshot.should_snapshot():
@@ -303,7 +309,7 @@ class DatabaseNode:
             elif cmd == "KEYS":
                 return self._handle_keys(args)
             elif cmd == "INFO":
-                return self._handle_info()
+                return self._handle_info(args)
             elif cmd == "CLUSTER":
                 return self._handle_cluster_info()
             elif cmd == "PING":
@@ -332,6 +338,10 @@ class DatabaseNode:
                 return self._handle_fault(args)
             elif cmd == "RATELIMIT":
                 return self._handle_ratelimit(args)
+            elif cmd == "__LOCAL_READ":
+                return self._handle_local_read(args)
+            elif cmd == "__REPLICA_SET":
+                return self._handle_replica_set(args)
             else:
                 return Protocol.create_response(False, error=f"Unknown command: {cmd}")
                 
@@ -458,8 +468,9 @@ class DatabaseNode:
         keys = self.store.keys(pattern)
         return Protocol.create_response(True, data=keys)
     
-    def _handle_info(self) -> Message:
+    def _handle_info(self, args: Optional[List[str]] = None) -> Message:
         """Handle INFO command."""
+        args = args or []
         info = {
             "node_id": self.node_id,
             "role": self.cluster.election.role.value,
@@ -470,6 +481,38 @@ class DatabaseNode:
             "cluster_size": self.cluster.membership.node_count(),
             "uptime": self.store.get_stats().get("uptime_seconds", 0)
         }
+
+        if args:
+            section = args[0].lower()
+            sections = {
+                "node": {
+                    "node_id": info["node_id"],
+                    "role": info["role"],
+                    "leader_id": info["leader_id"],
+                    "term": info["term"],
+                    "uptime": info["uptime"]
+                },
+                "storage": {
+                    "keys": info["keys"],
+                    "stats": info["stats"]
+                },
+                "cluster": {
+                    "leader_id": info["leader_id"],
+                    "cluster_size": info["cluster_size"],
+                    "role": info["role"],
+                    "term": info["term"]
+                },
+                "reads": self.read_coordinator.get_stats(),
+                "migration": self.migration.get_migration_status()
+            }
+
+            if section not in sections:
+                return Protocol.create_response(
+                    False,
+                    error=f"Unknown INFO section: {section}"
+                )
+            return Protocol.create_response(True, data=sections[section])
+
         return Protocol.create_response(True, data=info)
     
     def _handle_cluster_info(self) -> Message:
@@ -656,6 +699,58 @@ class DatabaseNode:
     def _handle_ratelimit(self, args: List[str]) -> Message:
         """Handle RATELIMIT command."""
         return Protocol.create_response(True, data=self.backpressure.get_stats())
+
+    def _handle_local_read(self, args: List[str]) -> Message:
+        """Handle an internal local-only read with metadata."""
+        if not args:
+            return Protocol.create_response(False, error="__LOCAL_READ requires key")
+
+        metadata = self.store.get_with_metadata(args[0])
+        if metadata is None:
+            return Protocol.create_response(True, data={
+                "found": False,
+                "value": None,
+                "version": 0,
+                "expires_at": None
+            })
+
+        return Protocol.create_response(True, data={
+            "found": True,
+            "value": metadata.value,
+            "version": metadata.version,
+            "expires_at": metadata.expires_at
+        })
+
+    def _handle_replica_set(self, args: List[str]) -> Message:
+        """Apply a repaired replica value without leader redirection."""
+        if len(args) < 3:
+            return Protocol.create_response(
+                False,
+                error="__REPLICA_SET requires key, value, and version"
+            )
+
+        key = args[0]
+
+        try:
+            value = json.loads(args[1])
+        except json.JSONDecodeError:
+            value = args[1]
+
+        try:
+            version = int(args[2])
+        except ValueError:
+            return Protocol.create_response(False, error="Version must be an integer")
+
+        ttl = None
+        if len(args) > 3 and args[3] not in ("", "None", "null"):
+            try:
+                expires_at = float(args[3])
+                ttl = max(0, int(expires_at - time.time()))
+            except ValueError:
+                ttl = None
+
+        self.store.set(key, value, ttl=ttl, version=version)
+        return Protocol.create_response(True, data="OK")
     
     
     def _handle_cluster_message(self, message: Message, client_socket: socket.socket) -> Optional[Message]:
@@ -710,19 +805,80 @@ class DatabaseNode:
             from .network.client import TCPClient
             client = TCPClient(node.host, node.client_port, timeout=5.0)
             if client.connect():
-                response = client.send_command("GET", key)
+                response = client.send_command("__LOCAL_READ", key)
                 client.disconnect()
                 if response and response.payload.get("success"):
-                    value = response.payload.get("data")
-                    return value, 0, value is not None
+                    data = response.payload.get("data", {})
+                    return (
+                        data.get("value"),
+                        int(data.get("version", 0)),
+                        bool(data.get("found"))
+                    )
         except Exception:
             pass
         
         return None, 0, False
     
-    def _repair_value(self, key: str, value: Any, version: int):
-        """Repair a stale value."""
-        self._apply_repair_data(key, value, version)
+    def _repair_value(self, key: str, value: Any, version: int, target_node_id: Optional[str] = None):
+        """Repair a stale value locally or on a remote replica."""
+        if not target_node_id or target_node_id == self.node_id:
+            self._apply_repair_data(key, value, version)
+            return
+
+        node = self.cluster.membership.get_node(target_node_id)
+        if not node:
+            return
+
+        metadata = self.store.get_with_metadata(key)
+        expires_at = metadata.expires_at if metadata else None
+
+        try:
+            from .network.client import TCPClient
+            client = TCPClient(node.host, node.client_port, timeout=5.0)
+            if client.connect():
+                client.send_command(
+                    "__REPLICA_SET",
+                    key,
+                    json.dumps(value),
+                    str(version),
+                    "" if expires_at is None else str(expires_at)
+                )
+                client.disconnect()
+        except Exception:
+            pass
+
+    def _sync_topology(self):
+        """Synchronize ring and routing metadata with cluster membership."""
+        members = self.cluster.membership.get_all_nodes()
+        active_node_ids = set()
+
+        for member in members:
+            if member.state == NodeState.DEAD:
+                self.router.remove_node(member.node_id)
+                continue
+
+            active_node_ids.add(member.node_id)
+            self.router.update_node_address(
+                member.node_id,
+                f"{member.host}:{member.client_port}"
+            )
+            self.router.set_node_health(member.node_id, member.state == NodeState.ALIVE)
+
+        new_nodes = active_node_ids - self._known_ring_nodes
+        removed_nodes = self._known_ring_nodes - active_node_ids
+
+        for node_id in sorted(new_nodes):
+            self.partitions.add_node(node_id)
+            self.migration.on_node_join(node_id)
+
+        for node_id in sorted(removed_nodes):
+            if node_id == self.node_id:
+                continue
+            self.partitions.remove_node(node_id)
+            self.router.remove_node(node_id)
+            self.migration.on_node_leave(node_id)
+
+        self._known_ring_nodes = active_node_ids
     
     def _send_migration_keys(self, target_node: str, keys_data: Dict[str, Any]) -> bool:
         """Send migrated keys to target node."""
