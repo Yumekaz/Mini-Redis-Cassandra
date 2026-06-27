@@ -2,6 +2,7 @@
 TCP Client for connecting to database nodes.
 """
 
+import os
 import socket
 import threading
 from typing import Optional, List, Any
@@ -19,14 +20,46 @@ class TCPClient:
         self.host = host
         self.port = port
         self.timeout = timeout
-        self.node_id = node_id
+        self.node_id = node_id or os.environ.get("NODE_ID", "")
         
         self._socket: Optional[socket.socket] = None
         self._connected = False
         self._lock = threading.Lock()
     
+    def _check_proxy(self) -> bool:
+        """Check if connection to target node is blocked or delayed by the proxy."""
+        import os
+        proxy_port = os.environ.get("PROXY_PORT")
+        if not proxy_port:
+            return True
+        
+        try:
+            import urllib.request
+            import json
+            import time
+            start_port = int(os.environ.get("START_PORT", "7001"))
+            target_node = f"node-{self.port - start_port + 1}"
+            from_node = self.node_id or os.environ.get("NODE_ID", "")
+            
+            if from_node and target_node:
+                url = f"http://localhost:{proxy_port}/failforge/check?from={from_node}&to={target_node}"
+                req = urllib.request.Request(url)
+                with urllib.request.urlopen(req, timeout=1.0) as resp:
+                    res = json.loads(resp.read().decode("utf-8"))
+                    if res.get("blocked"):
+                        return False
+                    delay_ms = res.get("delay_ms", 0)
+                    if delay_ms > 0:
+                        time.sleep(delay_ms / 1000.0)
+        except Exception:
+            pass
+        return True
+
     def connect(self) -> bool:
         """Connect to the server."""
+        if not self._check_proxy():
+            self._connected = False
+            return False
         try:
             self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self._socket.settimeout(self.timeout)
@@ -63,6 +96,10 @@ class TCPClient:
         Returns:
             Response message or None on error
         """
+        if not self._check_proxy():
+            self.disconnect()
+            return None
+
         if not self._connected:
             if not self.connect():
                 return None
@@ -92,6 +129,10 @@ class TCPClient:
     
     def send_message(self, message: Message) -> Optional[Message]:
         """Send a raw message and get response."""
+        if not self._check_proxy():
+            self.disconnect()
+            return None
+
         if not self._connected:
             if not self.connect():
                 return None
@@ -118,6 +159,10 @@ class TCPClient:
     
     def send_message_no_response(self, message: Message) -> bool:
         """Send a message without waiting for response."""
+        if not self._check_proxy():
+            self.disconnect()
+            return False
+
         if not self._connected:
             if not self.connect():
                 return False
