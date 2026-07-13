@@ -136,17 +136,16 @@ def test_partition_write_and_read_repair():
     )
 
     try:
-        ring = nodes[0].ring
+        # Writes are leader-coordinated; partition from the write leader.
+        assert wait_for(lambda: sum(1 for n in nodes if n.cluster.is_leader()) == 1)
+        leader = next(n for n in nodes if n.cluster.is_leader())
         key = "repair:key"
-        owner_id = ring.get_node(key)
-        replicas = ring.get_nodes(key, 3)
-        stale_replica_id = next(replica for replica in replicas if replica != owner_id)
-        owner = get_node(nodes, owner_id)
+        stale_replica_id = next(n.node_id for n in nodes if n.node_id != leader.node_id)
 
-        owner.fault_injector.enable()
-        owner.fault_injector.inject_fault(create_network_partition([stale_replica_id]))
+        leader.fault_injector.enable()
+        leader.fault_injector.inject_fault(create_network_partition([stale_replica_id]))
 
-        write_port = next(port for port, _ in ports if port != get_port(nodes, ports, owner_id))
+        write_port = get_port(nodes, ports, leader.node_id)
         client = connect_client(write_port)
         try:
             assert_success(client.send_command("SET", key, "value-1"), "partitioned write") == "OK"
@@ -157,8 +156,8 @@ def test_partition_write_and_read_repair():
         stale_before = local_read(stale_port, key)
         assert stale_before["found"] is False
 
-        owner.fault_injector.clear_all_faults()
-        owner.fault_injector.disable()
+        leader.fault_injector.clear_all_faults()
+        leader.fault_injector.disable()
 
         stale_client = connect_client(stale_port)
         try:

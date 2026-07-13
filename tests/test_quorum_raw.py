@@ -142,24 +142,24 @@ def test_read_after_write_default_quorum_from_any_node():
         stop_cluster(nodes, base_dir)
 
 
+def _leader_and_port(nodes, ports):
+    assert wait_for(lambda: sum(1 for n in nodes if n.cluster.is_leader()) == 1), "need exactly one leader"
+    leader = next(n for n in nodes if n.cluster.is_leader())
+    port = next(ports[i][0] for i, n in enumerate(nodes) if n.node_id == leader.node_id)
+    return leader, port
+
+
 def test_quorum_write_requires_remote_ack():
     """With RF=3, a write whose remotes all fail must not be acknowledged."""
     nodes, ports, base_dir = build_cluster(base_name="raw_no_ack")
     try:
-        owner = nodes[0]
-        # Force every replicate send to fail.
-        owner.cluster.replication._send_replicate = lambda follower_id, entry: False
+        leader, leader_port = _leader_and_port(nodes, ports)
+        # Force every replicate send to fail on the write leader.
+        leader.cluster.replication._send_replicate = lambda follower_id, entry: False
 
-        # Find a key owned by node1 so the write stays local to the patched node.
-        key = None
-        for i in range(5000):
-            candidate = f"owned:{i}"
-            if owner.ring.get_node(candidate) == owner.node_id:
-                key = candidate
-                break
-        assert key is not None
+        key = "leader-only-key"
 
-        client = TCPClient("localhost", ports[0][0], timeout=5.0)
+        client = TCPClient("localhost", leader_port, timeout=5.0)
         assert client.connect()
         response = client.send_command("SET", key, "should-fail")
         client.disconnect()
@@ -168,6 +168,93 @@ def test_quorum_write_requires_remote_ack():
         assert response.payload.get("success") is False, (
             f"write should fail without remote acks: {response.payload}"
         )
+        # Primary-first + revert: never-acked write must not remain visible.
+        meta = leader.store.get_with_metadata(key)
+        assert meta is None, f"orphaned never-acked value on leader: {meta}"
         print("[OK] QUORUM write fails closed without remote acks")
+    finally:
+        stop_cluster(nodes, base_dir)
+
+
+def test_failed_write_not_visible_via_get_strong_or_quorum():
+    """
+    Residual class: GET must not return a value from a write that never acked.
+    Simulates remote-ack failure after primary-local apply (reverted).
+    """
+    nodes, ports, base_dir = build_cluster(base_name="raw_invisible_fail")
+    try:
+        key = "invis:leader-key"
+
+        # Seed an acked value so we also check failed follow-up does not replace it.
+        seeded = False
+        for _ in range(10):
+            leader, leader_port = _leader_and_port(nodes, ports)
+            seed_client = TCPClient("localhost", leader_port, timeout=5.0)
+            if not seed_client.connect():
+                continue
+            resp = seed_client.send_command("SET", key, "stable")
+            seed_client.disconnect()
+            if resp and resp.payload.get("success"):
+                seeded = True
+                break
+            time.sleep(0.3)
+        assert seeded, "failed to seed stable value under current leader"
+
+        leader, leader_port = _leader_and_port(nodes, ports)
+        leader.cluster.replication._send_replicate = lambda follower_id, entry: False
+
+        client = TCPClient("localhost", leader_port, timeout=5.0)
+        assert client.connect()
+        bad = client.send_command("SET", key, "never-acked-phantom")
+        # If leadership moved, re-resolve and retry the failing write once.
+        if bad is not None and bad.payload.get("success"):
+            pass  # unexpected success would still be checked below
+        elif bad is None or not bad.payload.get("success"):
+            if bad is None or "Leader" in str(bad.payload.get("error")):
+                leader, leader_port = _leader_and_port(nodes, ports)
+                leader.cluster.replication._send_replicate = lambda follower_id, entry: False
+                client.disconnect()
+                client = TCPClient("localhost", leader_port, timeout=5.0)
+                assert client.connect()
+                bad = client.send_command("SET", key, "never-acked-phantom")
+        assert bad is not None and bad.payload.get("success") is False
+
+        for level in ("STRONG", "QUORUM", "ANY"):
+            got = assert_success(client.send_command("GET", key, level), f"GET {level}")
+            assert got == "stable", f"{level} saw never-acked value: {got!r}"
+        client.disconnect()
+        print("[OK] Failed write not visible via GET")
+    finally:
+        stop_cluster(nodes, base_dir)
+
+
+def test_single_leader_serializes_same_key_writes():
+    """Two clients must not both ACK concurrent SETs that diverge without order."""
+    nodes, ports, base_dir = build_cluster(base_name="raw_single_leader")
+    try:
+        import threading
+        results = []
+
+        def do_set(port, value):
+            client = TCPClient("localhost", port, timeout=5.0)
+            assert client.connect()
+            resp = client.send_command("SET", "same-key", value)
+            client.disconnect()
+            results.append((value, resp.payload.get("success") if resp else None,
+                            resp.payload.get("data") if resp else None))
+
+        t1 = threading.Thread(target=do_set, args=(ports[0][0], "A"))
+        t2 = threading.Thread(target=do_set, args=(ports[1][0], "B"))
+        t1.start(); t2.start(); t1.join(); t2.join()
+
+        # At least one must succeed; final STRONG read must match a successful write.
+        oks = [v for v, ok, _ in results if ok]
+        assert oks, f"no successful write: {results}"
+        client = TCPClient("localhost", ports[0][0], timeout=5.0)
+        assert client.connect()
+        final = assert_success(client.send_command("GET", "same-key", "STRONG"), "final")
+        client.disconnect()
+        assert final in oks, f"final {final!r} not in successful writes {oks}"
+        print("[OK] Single-leader same-key writes serialize")
     finally:
         stop_cluster(nodes, base_dir)

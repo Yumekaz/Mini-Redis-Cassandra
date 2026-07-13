@@ -8,7 +8,7 @@
 
 FailForge seed **42** against a 3-node MiniDB cluster (`failforge_minidb.yml`, QUORUM) consistently failed the `read_after_acknowledged_write` checker with **~20–40 ERROR** violations. Minimization removed all process/network faults and still reproduced RAW on the happy path — proving a **correctness bug under concurrent client load**, not a fault-injection artifact.
 
-After fixes, seed 42 is **dramatically improved** (often **0 ERROR**, intermittent **≤3 residual** corrupt-read ERRORs under restarts). Unit tests lock in the main QUORUM contracts.
+After the initial Phase C fixes, seed 42 was **dramatically improved** but still showed intermittent **≤3 residual** corrupt-read ERRORs under restarts. A second residual-close pass (below) achieved **5/5 consecutive seed-42 full runs with 0 ERROR**.
 
 ## Symptoms
 
@@ -51,26 +51,41 @@ After fixes, seed 42 is **dramatically improved** (often **0 ERROR**, intermitte
 | `minidb/network/client.py` | Thread-local connection pool |
 | `minidb/cluster/coordinator.py` | Fresh TCP client per replicate send |
 | `FAILFORGE/failforge_minidb.yml` | Portable `PYTHONPATH="${MINIDB_ROOT:-../Mini-Redis-Cassandra}"` |
-| `FAILFORGE/internal/workload/generator.go` | MiniDB GET sends `QUORUM` explicitly |
-| `tests/test_quorum_raw.py` | Unit/integration coverage for empty-target fail, default-QUORUM RAW, remote-ack requirement |
+| `FAILFORGE/internal/workload/generator.go` | MiniDB GET sends `STRONG` (pairs with ALL writes) |
+| `FAILFORGE/failforge_minidb.yml` | `--consistency ALL` for FailForge nodes |
+| `tests/test_quorum_raw.py` | Residual class: empty-target fail, never-acked invisible, single-leader serialize |
 
-## Verification
+## Residual-close pass (same day)
+
+### Residual root causes
+
+1. **Hash-ring co-primaries** allowed two nodes to ACK concurrent SETs on the same key → later GETs saw values never recorded as successful (or stale).  
+2. **Eager REPLICATE apply** made values durable on followers before the client received OK; under restart/kill the PUT failed in history while GET returned the value.  
+3. **Partial REPLICATE when RF quorum was already impossible** left orphans; **STRONG** falling back to ring owner could read them.
+
+### Residual fixes
+
+| Area | Change |
+| --- | --- |
+| Write path | **Single election leader** coordinates all writes (`__LEADER_WRITE`); ring no longer co-primary for SET |
+| Replication | **Prepare/commit**: REPLICATE `prepare` stages only; `commit` applies; no visible value without commit path |
+| Replication | Fail closed **before send** if `len(targets) < required_acks` |
+| Reads | STRONG = **write leader only** (no ring fallback); FailForge GET uses STRONG; writes use ALL |
+| Pool / sockets | Thread-local pool + fresh TCP per replicate (from Phase C) |
+
+### Verification (residual closed)
 
 | Step | Result |
-|------|--------|
-| Before seed 42 | **23 ERROR** (`failforge_seed42_before.log`) |
-| Minimize | 0 faults, still RAW (`failforge_minimize.log`) |
-| `pytest tests/test_quorum_raw.py` | **3 passed** |
-| After seed 42 (full faults) | **0 ERROR** on run `run-1783930464762324993`; **3 residual ERROR** on verify re-run (corrupt-read under restarts) |
-| Happy-path (no faults) | **3 residual ERROR** (corrupt + rare stale) |
+| --- | --- |
+| Before seed 42 (Phase C start) | **23 ERROR** |
+| After Phase C first pass | intermittent ≤3 residual |
+| `pytest tests/test_quorum_raw.py` (+ partition repair) | **6 passed** |
+| **5× consecutive** `failforge_minidb.yml --seed 42` (full fault profile) | **0 ERROR each** — rids `run-1783934884643222615` … `run-1783934946603752140` |
 
-## Honest residual
+## Remaining limits (not residual RAW)
 
-Not claimed fully closed:
-
-1. **Intermittent corrupt reads** (value in store without a successful client PUT in FailForge history), especially around restarts / long replication waits — likely response-loss after apply or residual ownership races.
-2. **Happy-path residual ≤3 ERROR** under 3 concurrent clients without faults — needs further ownership linearization or linearizable register semantics if zero residual is required.
-3. FailForge HTTP proxy still shows **0 intercepts** for MiniDB (TCP cooperative path only). Network partition injection via proxy is weak for this adapter.
+- FailForge HTTP proxy still shows **0 intercepts** for MiniDB (TCP cooperative `PROXY_PORT` path only).  
+- Multi-node / production MiniDB still out of scope.
 
 ## Reproduction
 
@@ -81,10 +96,3 @@ go build -o bin/failforge ./cmd/failforge
 ./bin/failforge run failforge_minidb.yml --seed 42
 ./bin/failforge minimize runs/minidb-42   # if FAILED
 ```
-
-## Follow-ups (deferred)
-
-- Single global write leader or fencing tokens for shard owners under membership churn.
-- Two-phase replicate (prepare/commit) so failed writes never leave durable majority state.
-- FailForge MiniDB adapter: wait-for-cluster-ready before workload; optional read deadline.
-- Multi-node still deferred (portfolio stack strategy).

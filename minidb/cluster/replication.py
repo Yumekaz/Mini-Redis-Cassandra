@@ -138,8 +138,9 @@ class ReplicationManager:
         if required_acks == 0:
             return True
 
-        if not followers:
-            # Cannot meet remote ack requirement with zero targets.
+        if not followers or len(followers) < required_acks:
+            # Do not send partial REPLICATEs that would leave durable orphans
+            # when we already know the ack quorum is impossible.
             return False
         
         # Create pending request

@@ -150,7 +150,9 @@ class DatabaseNode:
             get_local_value=self._get_local_value_for_read,
             get_remote_value=self._get_remote_value_for_read,
             get_replicas=lambda key: self.ring.get_nodes(key, self.config.replication_factor),
-            get_primary_owner=lambda key: self.ring.get_node(key),
+            # STRONG reads the write leader only — never a hash-ring fallback
+            # that may hold unreplicated/orphan REPLICATE data.
+            get_primary_owner=lambda key: self.cluster.get_leader_id(),
             repair_value=self._repair_value
         )
     
@@ -345,6 +347,8 @@ class DatabaseNode:
                 return self._handle_fault(args)
             elif cmd == "RATELIMIT":
                 return self._handle_ratelimit(args)
+            elif cmd == "__LEADER_WRITE":
+                return self._handle_leader_write(args)
             elif cmd == "__OWNER_WRITE":
                 return self._handle_owner_write(args)
             elif cmd == "__LOCAL_READ":
@@ -406,20 +410,23 @@ class DatabaseNode:
             except ValueError:
                 pass
         
-        # Use read coordinator for consistency-aware reads
-        value, found, metadata = self.read_coordinator.read(key, consistency)
-        
-        if found:
-            return Protocol.create_response(True, data=value)
+        # Serialize with in-flight leader writes so GETs never observe a
+        # half-applied write that will later fail and leave no client ACK.
+        with self._write_lock:
+            value, found, metadata = self.read_coordinator.read(key, consistency)
 
-        # Quorum/strong/all: unreachable majority is an error, not a null hit.
-        if metadata.get("quorum_failed"):
-            return Protocol.create_response(
-                False,
-                error=f"Quorum read failed for key {key}"
-            )
+            if found:
+                return Protocol.create_response(True, data=value)
 
-        return Protocol.create_response(True, data=None)
+            # Quorum/strong/all: unreachable majority is an error, not a null hit.
+            if metadata.get("quorum_failed"):
+                return Protocol.create_response(
+                    False,
+                    error=f"Quorum read failed for key {key}"
+                )
+
+            return Protocol.create_response(True, data=None)
+
     def _handle_delete(self, args: List[str]) -> Message:
         """Handle DELETE command."""
         if len(args) < 1:
@@ -432,43 +439,54 @@ class DatabaseNode:
     def _coordinate_or_forward_write(self, operation: str, key: str,
                                      value: Any = None,
                                      ttl: Optional[int] = None) -> Message:
-        """Route a write to the key's primary owner and coordinate replication there."""
-        primary_owner = self.ring.get_node(key)
-        if not primary_owner:
-            return Protocol.create_response(False, error=f"No shard owner available for key: {key}")
+        """
+        Route every write through the current election leader.
 
-        if primary_owner != self.node_id:
-            return self._forward_write(primary_owner, operation, key, value=value, ttl=ttl)
+        Hash-ring co-primaries previously allowed two nodes to ACK concurrent
+        SETs for the same key (FailForge corrupt/stale residual). Single-leader
+        coordination serializes the write path.
+        """
+        if not self.cluster.is_leader():
+            leader_id = self.cluster.get_leader_id()
+            if not leader_id:
+                return Protocol.create_response(False, error="No cluster leader for write")
+            return self._forward_write(leader_id, operation, key, value=value, ttl=ttl)
 
         return self._apply_partition_write(operation, key, value=value, ttl=ttl)
 
     def _forward_write(self, node_id: str, operation: str, key: str,
                        value: Any = None,
                        ttl: Optional[int] = None) -> Message:
-        """Forward a write to the primary owner."""
+        """Forward a write to the coordinating leader (or legacy primary owner)."""
         node = self.cluster.membership.get_node(node_id)
         if not node or node.state != NodeState.ALIVE:
-            return Protocol.create_response(False, error=f"Primary owner unavailable for key: {key}")
+            return Protocol.create_response(False, error=f"Write coordinator unavailable for key: {key}")
 
         try:
             from .network.client import TCPClient
             client = TCPClient(node.host, node.client_port, timeout=10.0)
             if not client.connect():
-                return Protocol.create_response(False, error=f"Failed to reach primary owner {node_id}")
+                return Protocol.create_response(False, error=f"Failed to reach write coordinator {node_id}")
 
             if operation == "SET":
                 response = client.send_command(
-                    "__OWNER_WRITE",
+                    "__LEADER_WRITE",
                     operation,
                     key,
                     json.dumps(value),
                     "" if ttl is None else str(ttl)
                 )
             else:
-                response = client.send_command("__OWNER_WRITE", operation, key)
+                response = client.send_command("__LEADER_WRITE", operation, key)
 
             client.disconnect()
             if response:
+                # Stale leader: retry once against the current election winner.
+                err = (response.payload or {}).get("error") or ""
+                if (not response.payload.get("success")) and "Leader mismatch" in err:
+                    leader_id = self.cluster.get_leader_id()
+                    if leader_id and leader_id != node_id:
+                        return self._forward_write(leader_id, operation, key, value=value, ttl=ttl)
                 return response
         except Exception:
             pass
@@ -479,9 +497,8 @@ class DatabaseNode:
                                value: Any = None,
                                ttl: Optional[int] = None) -> Message:
         """Coordinate a write for the key's replica set from the primary owner."""
-        primary_owner = self.ring.get_node(key)
-        if primary_owner != self.node_id:
-            return Protocol.create_response(False, error=f"This node is not the primary owner for {key}")
+        if not self.cluster.is_leader():
+            return Protocol.create_response(False, error=f"This node is not the write leader for {key}")
 
         # Refuse writes until the ring can place a full replica set for RF.
         # Early single-node ownership produced false local-only successes.
@@ -495,9 +512,14 @@ class DatabaseNode:
                 ),
             )
 
-        replicas = self.ring.get_nodes(key, self.config.replication_factor)
+        # Prefer full membership as the replica set so ALL/QUORUM track the
+        # live cluster, not a stale ring after restarts.
+        alive = [n.node_id for n in self.cluster.membership.get_alive_nodes()]
+        if self.node_id not in alive:
+            alive = [self.node_id] + alive
+        replicas = alive[: max(self.config.replication_factor, len(alive))]
         if self.node_id not in replicas:
-            replicas = [self.node_id] + replicas
+            replicas = [self.node_id] + [r for r in replicas if r != self.node_id]
 
         with self._write_lock:
             current = self.store.get_with_metadata(key)
@@ -525,8 +547,24 @@ class DatabaseNode:
                 for n in self.cluster.membership.get_alive_nodes()
                 if n.node_id != self.node_id
             }
-            targets = [r for r in remote_replicas if r in alive_ids] or list(remote_replicas)
+            targets = [r for r in remote_replicas if r in alive_ids]
+            # Require every ring replica to be membership-alive before acking a
+            # sync write. Partial rings left durable orphans that FailForge
+            # scored as corrupt "never successfully written" values.
+            if remote_replicas and len(targets) < len(remote_replicas):
+                missing = sorted(set(remote_replicas) - set(targets))
+                return Protocol.create_response(
+                    False,
+                    error=(
+                        f"Replication targets unavailable for {operation}: "
+                        f"missing {missing} (replica set {replicas})"
+                    ),
+                )
 
+            # Replicate first (followers apply on REPLICATE). Only apply on the
+            # leader after enough remote acks so concurrent GETs never observe a
+            # never-acked local value. If replicate fails, no remote acked under
+            # our sync send loop, so nothing durable is left on remotes.
             success = self.cluster.replication.replicate(
                 entry,
                 self.config.default_consistency,
@@ -534,12 +572,32 @@ class DatabaseNode:
             )
 
             if success:
+                # Commit staged prepares on remotes, then apply on the leader so
+                # a value is never client-visible (STRONG/QUORUM) without an ACK path.
+                if hasattr(self.cluster, "commit_to_followers"):
+                    self.cluster.commit_to_followers(entry, targets)
                 self._apply_log_entry(entry)
                 return Protocol.create_response(True, data="OK")
 
-        return Protocol.create_response(
-            False,
-            error=f"Replication failed for {operation} on replica set {replicas}"
+            return Protocol.create_response(
+                False,
+                error=f"Replication failed for {operation} on replica set {replicas}"
+            )
+
+    def _revert_partition_write(self, key: str, operation: str, previous) -> None:
+        """Undo a primary-local apply after a failed sync replicate."""
+        if previous is None:
+            if operation == "SET":
+                self.store.delete(key)
+            return
+        self.store.set(
+            key,
+            previous.value,
+            version=previous.version,
+            expires_at=previous.expires_at,
+            created_at=previous.created_at,
+            updated_at=previous.updated_at,
+            coordinator_id=previous.coordinator_id,
         )
     def _handle_exists(self, args: List[str]) -> Message:
         """Handle EXISTS command."""
@@ -786,6 +844,40 @@ class DatabaseNode:
     def _handle_ratelimit(self, args: List[str]) -> Message:
         """Handle RATELIMIT command."""
         return Protocol.create_response(True, data=self.backpressure.get_stats())
+
+    def _handle_leader_write(self, args: List[str]) -> Message:
+        """Handle an internal write routed to the election leader (any key)."""
+        if len(args) < 2:
+            return Protocol.create_response(False, error="__LEADER_WRITE requires command and key")
+
+        operation = args[0].upper()
+        key = args[1]
+        value = None
+        ttl = None
+
+        if operation == "SET":
+            if len(args) < 3:
+                return Protocol.create_response(False, error="SET requires value")
+            try:
+                value = json.loads(args[2])
+            except json.JSONDecodeError:
+                value = args[2]
+
+            if len(args) > 3 and args[3] not in ("", "None", "null"):
+                try:
+                    ttl = int(args[3])
+                except ValueError:
+                    return Protocol.create_response(False, error="TTL must be an integer")
+        elif operation != "DELETE":
+            return Protocol.create_response(False, error=f"Unsupported leader write: {operation}")
+
+        if not self.cluster.is_leader():
+            return Protocol.create_response(
+                False,
+                error=f"Leader mismatch for key {key}: this node is not the write leader"
+            )
+
+        return self._apply_partition_write(operation, key, value=value, ttl=ttl)
 
     def _handle_owner_write(self, args: List[str]) -> Message:
         """Handle an internal write already routed to the primary owner."""

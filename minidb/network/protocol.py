@@ -166,11 +166,12 @@ class Protocol:
         )
     
     @staticmethod
-    def create_replicate(sender_id: str, term: int, entry: Dict) -> Message:
-        """Create a replication message."""
+    def create_replicate(sender_id: str, term: int, entry: Dict,
+                         phase: str = "prepare") -> Message:
+        """Create a replication message (prepare stages; commit applies)."""
         return Message(
             msg_type=MessageType.REPLICATE,
-            payload={"entry": entry},
+            payload={"entry": entry, "phase": phase},
             sender_id=sender_id,
             term=term
         )

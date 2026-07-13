@@ -61,6 +61,7 @@ class ClusterCoordinator:
         
         # Connection pool for inter-node communication
         self._connection_pool = ConnectionPool(timeout=5.0, node_id=config.node_id)
+        self._staged_replicates = {}  # index -> LogEntry (prepare phase)
         
         # Set up callbacks
         self._setup_callbacks()
@@ -284,7 +285,8 @@ class ClusterCoordinator:
                 msg = Protocol.create_replicate(
                     self.node_id,
                     self.election.current_term,
-                    entry.to_dict()
+                    entry.to_dict(),
+                    phase="prepare",
                 )
 
                 response = client.send_message(msg)
@@ -298,6 +300,32 @@ class ClusterCoordinator:
 
         except Exception:
             return False
+
+    def commit_to_followers(self, entry: LogEntry, targets: list) -> None:
+        """Apply a previously prepared entry on followers (best-effort)."""
+        for follower_id in targets:
+            node = self.membership.get_node(follower_id)
+            if not node:
+                continue
+            if self.fault_injector and self.fault_injector.should_fail_network(follower_id):
+                continue
+            try:
+                from ..network.client import TCPClient
+                client = TCPClient(node.host, node.cluster_port, timeout=5.0, node_id=self.node_id)
+                if not client.connect():
+                    continue
+                try:
+                    msg = Protocol.create_replicate(
+                        self.node_id,
+                        self.election.current_term,
+                        entry.to_dict(),
+                        phase="commit",
+                    )
+                    client.send_message(msg)
+                finally:
+                    client.disconnect()
+            except Exception:
+                pass
     
     def _get_followers(self) -> List[str]:
         """Get list of follower node IDs."""
@@ -363,10 +391,22 @@ class ClusterCoordinator:
             entry_data = message.payload.get("entry")
             if entry_data:
                 entry = LogEntry.from_dict(entry_data)
-                # Apply the entry
+                phase = (message.payload.get("phase") or "prepare").lower()
+                if phase == "prepare":
+                    # Stage only — do not make the value visible until commit.
+                    # Prevents FailForge "never successfully written" corrupt reads
+                    # when a prepare is acked but the client never gets OK.
+                    if not hasattr(self, "_staged_replicates"):
+                        self._staged_replicates = {}
+                    self._staged_replicates[entry.index] = entry
+                    return Protocol.create_response(True, data={"success": True})
+                # commit (or legacy default apply)
+                staged = None
+                if hasattr(self, "_staged_replicates"):
+                    staged = self._staged_replicates.pop(entry.index, None)
+                to_apply = staged or entry
                 if self._on_apply_entry:
-                    self._on_apply_entry(entry)
-                
+                    self._on_apply_entry(to_apply)
                 return Protocol.create_response(True, data={"success": True})
             
             return Protocol.create_response(False, error="No entry in payload")
