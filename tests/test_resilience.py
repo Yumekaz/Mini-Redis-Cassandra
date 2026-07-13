@@ -235,6 +235,8 @@ def test_restart_with_persistence_recovery():
         shutil.rmtree(base_dir)
     base_dir.mkdir(parents=True)
 
+    # Single-node persistence: RF=1 so QUORUM is local-only (RF=3 would
+    # correctly refuse writes on a solo process after the FailForge RAW fix).
     node = create_node(
         "node1",
         client_port=7701,
@@ -244,6 +246,8 @@ def test_restart_with_persistence_recovery():
         snapshot_enabled=True,
         snapshot_interval=0.2,
         ttl_check_interval=0.1,
+        replication_factor=1,
+        default_consistency=ConsistencyLevel.ONE,
     )
     node.start()
 
@@ -269,6 +273,8 @@ def test_restart_with_persistence_recovery():
         client_port=7701,
         cluster_port=8701,
         data_dir=str(base_dir),
+        replication_factor=1,
+        default_consistency=ConsistencyLevel.ONE,
         aof_enabled=True,
         snapshot_enabled=True,
         snapshot_interval=0.2,

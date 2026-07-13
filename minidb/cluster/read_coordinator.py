@@ -99,13 +99,18 @@ class ReadCoordinator:
         """
         self._stats["total_reads"] += 1
         start_time = time.time()
+        quorum_failed = False
+        key_absent = False
         
         if consistency == ConsistencyLevel.STRONG:
             result = self._read_strong(key)
+            if result is None:
+                # Strong read could not reach primary — not a definitive miss.
+                quorum_failed = True
         elif consistency == ConsistencyLevel.QUORUM:
-            result = self._read_quorum(key)
+            result, quorum_failed, key_absent = self._read_quorum(key)
         elif consistency == ConsistencyLevel.ALL:
-            result = self._read_all(key)
+            result, quorum_failed, key_absent = self._read_all(key)
         else:  # ONE or ANY
             result = self._read_any(key, allow_stale)
         
@@ -114,7 +119,9 @@ class ReadCoordinator:
         metadata = {
             "consistency": consistency.value,
             "read_time_ms": read_time * 1000,
-            "node": self.local_node_id
+            "node": self.local_node_id,
+            "quorum_failed": quorum_failed,
+            "key_absent": key_absent,
         }
         
         if result:
@@ -146,61 +153,79 @@ class ReadCoordinator:
         
         return None
     
-    def _read_quorum(self, key: str) -> Optional[ReadResult]:
+    def _read_quorum(self, key: str) -> Tuple[Optional[ReadResult], bool, bool]:
         """
         Read from quorum of replicas.
+
+        Returns:
+            (result, quorum_failed, key_absent)
+            - result set when a non-null value won the quorum
+            - quorum_failed when fewer than quorum responses arrived
+            - key_absent when a quorum of replicas reported missing
         """
         self._stats["quorum_reads"] += 1
         
         if not self._get_replicas:
-            return self._read_local(key)
+            local = self._read_local(key)
+            if local:
+                return local, False, False
+            return None, False, True
         
         replicas = self._get_replicas(key)
-        quorum_size = len(replicas) // 2 + 1
+        quorum_size = max(1, len(replicas) // 2 + 1)
         
-        # Collect responses from replicas
+        # Collect responses from replicas (include missing markers)
         results = self._read_from_replicas(key, replicas, quorum_size)
         
         if len(results) < quorum_size:
-            return None
+            return None, True, False
         
-        # Find the most recent version deterministically
-        best_result = max(results, key=self._result_sort_key)
-        if best_result.version == 0 and best_result.value is None:
-            return None
+        # Find the most recent non-missing version deterministically
+        present = [r for r in results if not (r.version == 0 and r.value is None)]
+        if not present:
+            return None, False, True
+
+        best_result = max(present, key=self._result_sort_key)
         
         # Check for inconsistency and trigger read repair
-        versions = set(r.version for r in results)
-        if len(versions) > 1:
+        versions = set(r.version for r in present)
+        if len(versions) > 1 or len(present) < len(results):
             self._stats["stale_reads_detected"] += 1
             self._trigger_read_repair(key, best_result, results)
         
-        return best_result
+        return best_result, False, False
     
-    def _read_all(self, key: str) -> Optional[ReadResult]:
+    def _read_all(self, key: str) -> Tuple[Optional[ReadResult], bool, bool]:
         """
         Read from all replicas.
+
+        Returns:
+            (result, quorum_failed, key_absent) — same contract as _read_quorum
         """
         if not self._get_replicas:
-            return self._read_local(key)
+            local = self._read_local(key)
+            if local:
+                return local, False, False
+            return None, False, True
         
         replicas = self._get_replicas(key)
         results = self._read_from_replicas(key, replicas, len(replicas))
         
         if len(results) < len(replicas):
-            return None  # Not all replicas responded
+            return None, True, False  # Not all replicas responded
         
-        # Find most recent and check consistency
-        best_result = max(results, key=self._result_sort_key)
-        if best_result.version == 0 and best_result.value is None:
-            return None
+        present = [r for r in results if not (r.version == 0 and r.value is None)]
+        if not present:
+            return None, False, True
         
-        versions = set(r.version for r in results)
-        if len(versions) > 1:
+        best_result = max(present, key=self._result_sort_key)
+        
+        versions = set(r.version for r in present)
+        if len(versions) > 1 or len(present) < len(results):
             self._stats["stale_reads_detected"] += 1
             self._trigger_read_repair(key, best_result, results)
         
-        return best_result
+        return best_result, False, False
     
     def _read_any(self, key: str, allow_stale: bool = False) -> Optional[ReadResult]:
         """

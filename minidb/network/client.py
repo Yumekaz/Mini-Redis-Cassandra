@@ -176,32 +176,44 @@ class TCPClient:
 
 
 class ConnectionPool:
-    """Pool of connections to cluster nodes."""
+    """
+    Pool of connections to cluster nodes.
+
+    Connections are thread-local. A single shared TCP stream used from multiple
+    threads interleaved length-prefixed messages (gossip/replicate/election),
+    which produced phantom key values under FailForge concurrent load.
+    """
     
     def __init__(self, timeout: float = 5.0, node_id: str = ""):
         self.timeout = timeout
         self.node_id = node_id
-        self._connections: dict = {}
+        self._local = threading.local()
+        self._all_clients: list = []
         self._lock = threading.Lock()
     
     def get_connection(self, host: str, port: int) -> TCPClient:
-        """Get or create a connection to a node."""
+        """Get or create a thread-local connection to a node."""
         key = f"{host}:{port}"
-        
-        with self._lock:
-            if key not in self._connections:
-                client = TCPClient(host, port, self.timeout, self.node_id)
-                self._connections[key] = client
-            
-            client = self._connections[key]
-            if not client.is_connected():
-                client.connect()
-            
-            return client
+        conns = getattr(self._local, "connections", None)
+        if conns is None:
+            conns = {}
+            self._local.connections = conns
+
+        client = conns.get(key)
+        if client is None:
+            client = TCPClient(host, port, self.timeout, self.node_id)
+            conns[key] = client
+            with self._lock:
+                self._all_clients.append(client)
+
+        if not client.is_connected():
+            client.connect()
+
+        return client
     
     def close_all(self):
-        """Close all connections."""
+        """Close all connections created by this pool."""
         with self._lock:
-            for client in self._connections.values():
+            for client in self._all_clients:
                 client.disconnect()
-            self._connections.clear()
+            self._all_clients.clear()

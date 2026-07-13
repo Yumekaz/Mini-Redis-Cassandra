@@ -396,8 +396,10 @@ class DatabaseNode:
         
         key = args[0]
         
-        # Parse consistency level if provided
-        consistency = ConsistencyLevel.ANY
+        # Default to configured consistency (QUORUM under FailForge). ANY here
+        # previously caused read-after-write violations: QUORUM writes only need
+        # majority, so a local-only GET could hit a lagging replica.
+        consistency = self.config.default_consistency
         if len(args) > 1:
             try:
                 consistency = ConsistencyLevel(args[1].upper())
@@ -409,8 +411,15 @@ class DatabaseNode:
         
         if found:
             return Protocol.create_response(True, data=value)
+
+        # Quorum/strong/all: unreachable majority is an error, not a null hit.
+        if metadata.get("quorum_failed"):
+            return Protocol.create_response(
+                False,
+                error=f"Quorum read failed for key {key}"
+            )
+
         return Protocol.create_response(True, data=None)
-    
     def _handle_delete(self, args: List[str]) -> Message:
         """Handle DELETE command."""
         if len(args) < 1:
@@ -474,6 +483,18 @@ class DatabaseNode:
         if primary_owner != self.node_id:
             return Protocol.create_response(False, error=f"This node is not the primary owner for {key}")
 
+        # Refuse writes until the ring can place a full replica set for RF.
+        # Early single-node ownership produced false local-only successes.
+        ring_size = self.ring.get_node_count()
+        if ring_size < self.config.replication_factor:
+            return Protocol.create_response(
+                False,
+                error=(
+                    f"Cluster not ready for {operation}: ring has {ring_size} "
+                    f"nodes, need {self.config.replication_factor}"
+                ),
+            )
+
         replicas = self.ring.get_nodes(key, self.config.replication_factor)
         if self.node_id not in replicas:
             replicas = [self.node_id] + replicas
@@ -499,10 +520,17 @@ class DatabaseNode:
             )
 
             remote_replicas = [replica for replica in replicas if replica != self.node_id]
+            alive_ids = {
+                n.node_id
+                for n in self.cluster.membership.get_alive_nodes()
+                if n.node_id != self.node_id
+            }
+            targets = [r for r in remote_replicas if r in alive_ids] or list(remote_replicas)
+
             success = self.cluster.replication.replicate(
                 entry,
                 self.config.default_consistency,
-                targets=remote_replicas
+                targets=targets
             )
 
             if success:
@@ -513,7 +541,6 @@ class DatabaseNode:
             False,
             error=f"Replication failed for {operation} on replica set {replicas}"
         )
-    
     def _handle_exists(self, args: List[str]) -> Message:
         """Handle EXISTS command."""
         if len(args) < 1:

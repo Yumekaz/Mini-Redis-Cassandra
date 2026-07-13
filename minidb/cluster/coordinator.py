@@ -271,21 +271,31 @@ class ClusterCoordinator:
             return False
 
         try:
-            client = self._connection_pool.get_connection(node.host, node.cluster_port)
-            
-            msg = Protocol.create_replicate(
-                self.node_id,
-                self.election.current_term,
-                entry.to_dict()
-            )
-            
-            response = client.send_message(msg)
-            
-            if response and response.payload.get("success"):
-                return True
-            
-            return False
-            
+            # Fresh client per replicate: the shared pool reused one TCP stream
+            # for concurrent gossip/replicate/election traffic and could
+            # interleave length-prefixed messages under load, which surfaced as
+            # "phantom" values never present in the client history.
+            from ..network.client import TCPClient
+            client = TCPClient(node.host, node.cluster_port, timeout=5.0, node_id=self.node_id)
+            if not client.connect():
+                return False
+
+            try:
+                msg = Protocol.create_replicate(
+                    self.node_id,
+                    self.election.current_term,
+                    entry.to_dict()
+                )
+
+                response = client.send_message(msg)
+
+                if response and response.payload.get("success"):
+                    return True
+
+                return False
+            finally:
+                client.disconnect()
+
         except Exception:
             return False
     

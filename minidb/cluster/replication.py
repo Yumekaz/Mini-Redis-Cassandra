@@ -101,30 +101,35 @@ class ReplicationManager:
         consistency = consistency or self.default_consistency
         
         if targets is None and not self._get_followers:
+            # Sync levels require real remote acks when RF > 1.
+            if consistency in (
+                ConsistencyLevel.QUORUM,
+                ConsistencyLevel.ALL,
+                ConsistencyLevel.STRONG,
+            ) and self.replication_factor > 1:
+                return False
             return True
         
-        followers = list(targets) if targets is not None else self._get_followers()
+        followers = list(targets) if targets is not None else list(self._get_followers() or [])
         
-        if not followers:
-            # No followers, always succeed
-            return True
-        
-        # Calculate required acknowledgments
-        replica_count = len(followers) + 1  # +1 for coordinator/local replica
-        
+        # Calculate required acknowledgments from the configured replication
+        # factor (Cassandra-style), not only currently reachable targets.
+        # Using live follower count alone let QUORUM writes succeed with a
+        # single local replica when the ring was incomplete or remotes empty.
         if consistency == ConsistencyLevel.ONE or consistency == ConsistencyLevel.ANY:
             # Async replication
-            self._async_queue.put((entry, followers))
+            if followers:
+                self._async_queue.put((entry, followers))
             return True
             
         elif consistency == ConsistencyLevel.QUORUM:
-            required_total = replica_count // 2 + 1
+            required_total = self.replication_factor // 2 + 1
             
         elif consistency == ConsistencyLevel.ALL:
-            required_total = replica_count
+            required_total = self.replication_factor
             
         elif consistency == ConsistencyLevel.STRONG:
-            required_total = replica_count
+            required_total = self.replication_factor
             
         else:
             required_total = 1
@@ -132,6 +137,10 @@ class ReplicationManager:
         required_acks = max(0, required_total - 1)  # local apply counts as one
         if required_acks == 0:
             return True
+
+        if not followers:
+            # Cannot meet remote ack requirement with zero targets.
+            return False
         
         # Create pending request
         request = ReplicationRequest(
