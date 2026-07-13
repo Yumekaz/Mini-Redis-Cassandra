@@ -213,6 +213,19 @@ See [docs/troubleshooting.md](docs/troubleshooting.md) for detailed solutions.
 
 ---
 
+## FailForge (seed 42)
+
+This repo is a first-party target of **[FailForge](https://github.com/Yumekaz/FAILFORGE)** (`failforge_minidb.yml`). Seed **42** historically failed `read_after_acknowledged_write` under concurrent clients (happy path after minimize — no faults required). QUORUM defaults, fail-closed empty remotes, and connection-pool fixes closed most of that class.
+
+- **Postmortem:** [docs/postmortems/2026-07-failforge-seed42-raw.md](docs/postmortems/2026-07-failforge-seed42-raw.md)
+- **Regression tests:** `tests/test_quorum_raw.py`
+- **Re-run:** from a sibling FailForge checkout:  
+  `./bin/failforge run failforge_minidb.yml --seed 42`
+
+Stack context: [Cairn `docs/STACK.md`](https://github.com/Yumekaz/Cairn/blob/main/docs/STACK.md).
+
+---
+
 ## ⚠️ Known Limitations
 
 This project intentionally simplifies several aspects of production distributed systems:
