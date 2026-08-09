@@ -245,7 +245,6 @@ def test_consistent_hashing():
     print(f"New owner of 'test_key': {new_owner}")
     
     print("Consistent hashing test: PASSED")
-    return True
 
 
 def test_kv_store():
@@ -286,7 +285,6 @@ def test_kv_store():
     print(f"  Hit rate: {stats['hit_rate']:.2%}")
     
     print("KV Store test: PASSED")
-    return True
 
 
 def test_raft_election():
@@ -326,7 +324,6 @@ def test_raft_election():
     election1.stop()
     
     print("Leader election test: PASSED")
-    return True
 
 
 def test_merkle_tree():
@@ -365,7 +362,6 @@ def test_merkle_tree():
     print(f"Different ranges: {len(differences)}")
     
     print("Merkle tree test: PASSED")
-    return True
 
 
 def test_version_vectors():
@@ -402,7 +398,6 @@ def test_version_vectors():
     print(f"V2 vs Merged: {v2.compare(merged)}")
     
     print("Version vector test: PASSED")
-    return True
 
 
 def run_all_tests():
@@ -425,7 +420,9 @@ def run_all_tests():
     
     for name, test_func in tests:
         try:
-            success = test_func()
+            # The test functions raise on assertion/runtime failures.  A
+            # false return is retained for the legacy socket/cluster checks.
+            success = test_func() is not False
             results.append((name, success))
         except Exception as e:
             print(f"\nTest {name} FAILED with exception: {e}")

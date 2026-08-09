@@ -60,20 +60,20 @@ Performance characteristics of Mini-Redis/Cassandra.
 
 | Priority | Description |
 |----------|-------------|
-| **Readability** | Code is educational, well-commented |
-| **Correctness** | Algorithms match textbook descriptions |
+| **Inspectability** | Code and state transitions are visible and well-commented |
+| **Correctness** | Core invariants are exercised by focused tests |
 | **Simplicity** | No external dependencies |
-| **Demonstrability** | Easy to run, visualize, and explain |
+| **Operability** | Easy to run, observe, and failure-test |
 
 ---
 
 ## When to Use Mini-Redis/Cassandra
 
 ✅ **Good for:**
-- Learning distributed systems concepts
-- Prototyping and experimentation
-- Academic projects and demonstrations
-- Understanding how Redis/Cassandra work internally
+- Distributed-systems experimentation and systems R&D
+- Prototyping replication, sharding, repair, and failure behavior
+- Integration with failure-testing workflows
+- Studying implementation trade-offs against Redis/Cassandra architectures
 
 ❌ **Not for:**
 - Production workloads
@@ -92,4 +92,4 @@ Performance characteristics of Mini-Redis/Cassandra.
 
 ---
 
-Mini-Redis/Cassandra is designed for **learning and demonstration**, not production workloads. For production, use [Redis](https://redis.io/) or [Apache Cassandra](https://cassandra.apache.org/).
+Mini-Redis/Cassandra is designed for **experimental infrastructure and systems research**, not production workloads. For production, use [Redis](https://redis.io/) or [Apache Cassandra](https://cassandra.apache.org/) until the guarantees and security controls required by your deployment have been independently established.

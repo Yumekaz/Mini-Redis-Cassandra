@@ -2,7 +2,7 @@
 
 ## System Overview
 
-Mini-Redis/Cassandra is an educational distributed key-value store implementing concepts from Redis Cluster, Apache Cassandra, and simplified leader-based coordination.
+Mini-Redis/Cassandra is an experimental replicated distributed datastore implementing a Redis-like command surface, Cassandra-inspired sharding, and simplified leader-based coordination.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -111,7 +111,7 @@ Manages cluster membership and leader election.
 
 ### 4. Simplified Leader Election
 
-Used for cluster coordination and failover demos. This is intentionally simpler than full Raft and should not be treated as consensus-safe under partitions.
+Used for cluster coordination and failover experiments. This is intentionally simpler than full Raft and should not be treated as consensus-safe under partitions.
 
 ```
 ┌──────────┐     timeout      ┌───────────┐    wins vote    ┌──────────┐

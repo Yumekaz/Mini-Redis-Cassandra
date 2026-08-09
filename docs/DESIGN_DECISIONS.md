@@ -5,8 +5,8 @@ This document explains key architectural choices and their rationale.
 ## Why Pure Python?
 
 - **Zero dependencies** - Runs anywhere with Python 3.7+
-- **Educational clarity** - No framework magic to understand
-- **Easy modification** - Students can experiment directly
+- **Implementation transparency** - No framework magic hides the control flow
+- **Operational extensibility** - The components can be inspected and changed directly
 
 ## Why JSON Protocol?
 
@@ -50,7 +50,7 @@ For simplicity, we skip:
 - Authorization
 - Network partition handling (split-brain prevention)
 
-**Do not use for production workloads.**
+**Do not use for production workloads without adding the missing security and consensus guarantees.**
 
 ## Why Gossip for Membership?
 
@@ -60,7 +60,7 @@ For simplicity, we skip:
 
 ## Why Tunable Consistency?
 
-Demonstrates the CAP theorem trade-offs:
+Exposes CAP-theorem trade-offs:
 - `ANY` - Availability over consistency
 - `QUORUM` - Balanced
 - `ALL` - Consistency over availability

@@ -12,7 +12,7 @@ import traceback
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-def test_section(name):
+def section(name):
     print(f"\n{'='*60}")
     print(f"Testing: {name}")
     print('='*60)
@@ -28,7 +28,7 @@ def fail(msg, error=None):
 
 def validate_imports():
     """Test all module imports"""
-    test_section("Module Imports")
+    section("Module Imports")
     all_passed = True
     
     # Core modules
@@ -99,7 +99,7 @@ def validate_imports():
 
 def validate_classes():
     """Test that key classes can be instantiated"""
-    test_section("Class Instantiation")
+    section("Class Instantiation")
     all_passed = True
     
     # Test KVStore
@@ -177,7 +177,7 @@ def validate_classes():
 
 def validate_config():
     """Test configuration loading"""
-    test_section("Configuration")
+    section("Configuration")
     all_passed = True
     
     try:
@@ -192,7 +192,7 @@ def validate_config():
 
 def validate_protocol():
     """Test protocol encoding/decoding"""
-    test_section("Protocol")
+    section("Protocol")
     all_passed = True
     
     try:
@@ -225,7 +225,7 @@ def main():
     results.append(("Protocol", validate_protocol()))
     
     # Summary
-    test_section("SUMMARY")
+    section("SUMMARY")
     all_passed = True
     for name, passed in results:
         status = "PASS" if passed else "FAIL"

@@ -1,12 +1,12 @@
-# Mini-Redis/Cassandra - Educational Distributed KV Store
+# Mini-Redis/Cassandra — Experimental Replicated Distributed Datastore
 
 [![Python 3.7+](https://img.shields.io/badge/python-3.7+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 ![No Dependencies](https://img.shields.io/badge/dependencies-none-green.svg)
 
-An **educational distributed, fault-tolerant, in-memory key-value store** built from scratch in Python. It combines a Redis-like command surface with Cassandra-inspired sharding, replica-set reads, and simplified leader-based coordination for learning distributed systems.
+An **experimental replicated distributed datastore** built from scratch in Python. It combines a Redis-like command surface with Cassandra-inspired sharding, replica-set reads, persistence, failure injection, and term-based cluster coordination. It is an in-memory-first systems infrastructure project designed to make replication and failure behavior observable.
 
-> ⚠️ **Note**: This is a learning/demonstration project, not intended for production use. It implements simplified versions of leader election, replication, repair, and persistence to illustrate how real systems work.
+> ⚠️ **Scope**: This is serious systems infrastructure research/prototyping, but it is not production-ready. Leader election, replication, repair, and persistence are intentionally bounded implementations; the limitations below are part of the design contract.
 
 ---
 
@@ -157,14 +157,14 @@ python tests/test_resilience.py
 | **Leader Election** | Simplified term-based election | Gossip | Paxos |
 | **Sharding** | Consistent Hash | Hash Slots | Vnodes |
 | **Persistence** | AOF + Snapshot | RDB + AOF | SSTable |
-| **Use Case** | Learning/Demo | Production | Production |
+| **Use Case** | Experimental infrastructure | Production | Production |
 
-**What this project demonstrates:**
+**What this project provides:**
 - Consistent hashing concepts (similar to Cassandra)
 - AOF persistence pattern (similar to Redis)
 - Tunable consistency trade-offs
 - Shard-owner write coordination with replica-set replication
-- Simplified leader election for cluster coordination and failover demos
+- Term-based leader coordination and failure-oriented cluster behavior
 
 ---
 
@@ -172,7 +172,7 @@ python tests/test_resilience.py
 
 | Decision | Rationale |
 |----------|-----------|
-| **Pure Python** | No dependencies, easy to understand and modify |
+| **Pure Python** | No dependencies, portable, inspectable, and easy to extend |
 | **JSON Protocol** | Human-readable, easy debugging |
 | **Simplified Leader Election** | Easier to follow than full Raft, but not consensus-safe |
 | **Virtual Nodes** | Better load distribution than simple hashing |
@@ -183,7 +183,7 @@ See [DESIGN_DECISIONS.md](docs/DESIGN_DECISIONS.md) for detailed rationale.
 
 ---
 
-## 📚 Getting Started
+## 📚 Operating the Project
 
 1. **Clone the repository**
    ```bash
@@ -194,7 +194,7 @@ See [DESIGN_DECISIONS.md](docs/DESIGN_DECISIONS.md) for detailed rationale.
 2. **Start a cluster** (see [Quick Start](#-quick-start-2-minutes))
 
 3. **Read the docs:**
-   - [Quick Start Tutorial](docs/quickstart.md)
+   - [Quick Start](docs/quickstart.md)
    - [CLI Commands Reference](docs/cli-commands.md)
    - [Consistency Models](docs/consistency-models.md)
 
@@ -226,9 +226,9 @@ Stack context: [Cairn `docs/STACK.md`](https://github.com/Yumekaz/Cairn/blob/mai
 
 ---
 
-## ⚠️ Known Limitations
+## ⚠️ Current Engineering Boundaries
 
-This project intentionally simplifies several aspects of production distributed systems:
+This project intentionally stops short of several production distributed-systems guarantees:
 
 - **Consensus safety** - leader election is simplified and is not a full Raft implementation
 - **Split-brain prevention** - no fencing or lease-based protection is implemented

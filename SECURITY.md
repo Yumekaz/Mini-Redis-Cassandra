@@ -9,9 +9,9 @@ Instead, report them privately via email:
 
 ## Scope
 
-Mini-Redis-Cassandra is an educational project intended to demonstrate distributed database concepts using Python.
+Mini-Redis-Cassandra is an experimental replicated distributed datastore and systems-infrastructure project implemented in Python.
 
-It is **not designed for production use** or for handling sensitive data.
+It is **not production-ready** and must not be used for sensitive data or exposed to untrusted networks without a separate security layer.
 
 ## Security Considerations
 
@@ -21,7 +21,7 @@ The project explores mechanisms such as:
 - Consistent hashing and sharding
 - Persistence (AOF + snapshots)
 
-These are provided for learning purposes and may be incomplete.
+These mechanisms are intentionally bounded and may be incomplete under adversarial network conditions, partitions, or node compromise.
 
 For production distributed databases, use established systems such as:
 - Redis Cluster

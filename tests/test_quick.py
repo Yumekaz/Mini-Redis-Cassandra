@@ -35,7 +35,6 @@ def test_imports():
     from minidb.cli import DatabaseCLI
     
     print("  All imports OK!")
-    return True
 
 
 def test_kv_store():
@@ -69,7 +68,6 @@ def test_kv_store():
     assert not found
     
     print("  KV store OK!")
-    return True
 
 
 def test_consistent_hashing():
@@ -97,7 +95,6 @@ def test_consistent_hashing():
     assert len(set(replicas)) == 3
     
     print("  Consistent hashing OK!")
-    return True
 
 
 def test_merkle_tree():
@@ -123,7 +120,6 @@ def test_merkle_tree():
     assert tree1.get_root_hash() != tree2.get_root_hash()
     
     print("  Merkle tree OK!")
-    return True
 
 
 def test_version_vectors():
@@ -147,7 +143,6 @@ def test_version_vectors():
     assert v2.compare(merged) == "before"
     
     print("  Version vectors OK!")
-    return True
 
 
 def test_rate_limiter():
@@ -163,7 +158,6 @@ def test_rate_limiter():
     assert allowed == 5  # Only burst amount
     
     print("  Rate limiter OK!")
-    return True
 
 
 def run_tests():
@@ -186,10 +180,8 @@ def run_tests():
     
     for test in tests:
         try:
-            if test():
-                passed += 1
-            else:
-                failed += 1
+            test()
+            passed += 1
         except Exception as e:
             print(f"  FAILED: {e}")
             failed += 1
