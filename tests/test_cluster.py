@@ -26,7 +26,7 @@ def wait_for_leader(node, timeout=10):
     return False
 
 
-def test_single_node():
+def test_single_node(request):
     """Test single node operations."""
     print("\n" + "="*60)
     print("TEST 1: Single Node Operations")
@@ -39,33 +39,37 @@ def test_single_node():
         cluster_port=8001,
         data_dir="./test_data",
         aof_enabled=False,  # Disable persistence for test
-        snapshot_enabled=False
+        snapshot_enabled=False,
+        # A single member cannot satisfy the default RF=3 quorum. This is a
+        # deliberate local-node test, so make its consistency model explicit.
+        replication_factor=1,
+        default_consistency=ConsistencyLevel.ONE,
     )
+    request.addfinalizer(node.stop)
     node.start()
     
     # Wait for leader election
     if not wait_for_leader(node, timeout=10):
-        print("FAILED: Timeout waiting for leader election")
-        node.stop()
-        return False
+        raise AssertionError("timeout waiting for leader election")
     
     # Connect a client
     client = TCPClient("localhost", 7001)
     if not client.connect():
-        print("Failed to connect!")
-        node.stop()
-        return False
+        raise AssertionError("failed to connect client")
     
     # Test PING
     response = client.send_command("PING")
+    assert response and response.payload.get("success"), "PING failed"
     print(f"PING: {response.payload.get('data') if response else 'ERROR'}")
     
     # Test SET
     response = client.send_command("SET", "hello", "world")
+    assert response and response.payload.get("success"), "SET hello failed"
     print(f"SET hello world: {response.payload.get('data') if response else 'ERROR'}")
     
     # Test GET
     response = client.send_command("GET", "hello")
+    assert response and response.payload.get("data") == "world", "GET hello returned wrong value"
     print(f"GET hello: {response.payload.get('data') if response else 'ERROR'}")
     
     # Test SET with TTL
@@ -99,10 +103,7 @@ def test_single_node():
         print(f"INFO: role={info.get('role')}, keys={info.get('keys')}")
     
     client.disconnect()
-    node.stop()
-    
     print("Single node test: PASSED")
-    return True
 
 
 def test_cluster():
@@ -134,6 +135,7 @@ def test_cluster():
         # Node 2 and 3 join via node 1
         for i in range(1, 3):
             success = nodes[i].join_cluster(f"localhost:{8001}")
+            assert success, f"node{i+1} failed to join cluster"
             print(f"Node{i+1} joined cluster: {success}")
         
         time.sleep(2)  # Wait for cluster to stabilize
@@ -149,25 +151,24 @@ def test_cluster():
                 break
         
         if not leader_node:
-            print("No leader elected!")
-            return False
+            raise AssertionError("no leader elected")
         
         # Connect to leader
         client = TCPClient("localhost", leader_port)
         if not client.connect():
-            print("Failed to connect to leader!")
-            return False
+            raise AssertionError("failed to connect to leader")
         
         # Write some data
         print("\nWriting data through leader...")
         for i in range(10):
             response = client.send_command("SET", f"key{i}", f"value{i}")
-            if not response or not response.payload.get('success'):
-                print(f"Failed to SET key{i}")
+            assert response and response.payload.get('success'), f"failed to SET key{i}"
         
         # Verify data exists
         response = client.send_command("KEYS", "*")
+        assert response and response.payload.get("success"), "KEYS failed"
         keys = response.payload.get('data', [])
+        assert len(keys) >= 10, f"expected replicated keys, got {keys}"
         print(f"Total keys in leader: {len(keys)}")
         
         # Check cluster info
@@ -190,11 +191,14 @@ def test_cluster():
                     # Read from follower
                     response = follower_client.send_command("GET", "key5")
                     value = response.payload.get('data') if response else None
+                    assert response and response.payload.get("success"), f"node{i+1} GET key5 failed"
+                    assert value == "value5", f"node{i+1} replicated value mismatch: {value!r}"
                     print(f"Node{i+1} GET key5: {value}")
                     follower_client.disconnect()
+                else:
+                    raise AssertionError(f"failed to connect to follower node{i+1}")
         
         print("Cluster test: PASSED")
-        return True
         
     finally:
         # Cleanup
