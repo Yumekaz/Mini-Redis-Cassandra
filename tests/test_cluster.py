@@ -7,6 +7,7 @@ import time
 import threading
 import sys
 import os
+TEST_DATA_ROOT = os.environ.get("MINIDB_TEST_STATE_DIR", "./test_data")
 
 # Add parent to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -37,7 +38,7 @@ def test_single_node(request):
         "node1",
         client_port=7001,
         cluster_port=8001,
-        data_dir="./test_data",
+        data_dir=os.path.join(TEST_DATA_ROOT, "single"),
         aof_enabled=False,  # Disable persistence for test
         snapshot_enabled=False,
         # A single member cannot satisfy the default RF=3 quorum. This is a
@@ -121,7 +122,7 @@ def test_cluster():
                 f"node{i+1}",
                 client_port=7001 + i,
                 cluster_port=8001 + i,
-                data_dir=f"./test_data/node{i+1}",
+                data_dir=os.path.join(TEST_DATA_ROOT, f"node{i+1}"),
                 aof_enabled=False,
                 snapshot_enabled=False,
                 replication_factor=3

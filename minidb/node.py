@@ -561,10 +561,7 @@ class DatabaseNode:
                     ),
                 )
 
-            # Replicate first (followers apply on REPLICATE). Only apply on the
-            # leader after enough remote acks so concurrent GETs never observe a
-            # never-acked local value. If replicate fails, no remote acked under
-            # our sync send loop, so nothing durable is left on remotes.
+            # Prepare acknowledgements alone are not durable applications.
             success = self.cluster.replication.replicate(
                 entry,
                 self.config.default_consistency,
@@ -572,10 +569,17 @@ class DatabaseNode:
             )
 
             if success:
-                # Commit staged prepares on remotes, then apply on the leader so
-                # a value is never client-visible (STRONG/QUORUM) without an ACK path.
-                if hasattr(self.cluster, "commit_to_followers"):
-                    self.cluster.commit_to_followers(entry, targets)
+                committed = self.cluster.commit_to_followers(entry, targets)
+                consistency = self.config.default_consistency
+                required_total = (
+                    self.config.replication_factor if consistency in (ConsistencyLevel.ALL, ConsistencyLevel.STRONG)
+                    else self.config.replication_factor // 2 + 1 if consistency == ConsistencyLevel.QUORUM
+                    else 1
+                )
+                if committed + 1 < required_total:
+                    # A failed/ambiguous write can have applied remotely, but
+                    # must never be reported as an acknowledged durable write.
+                    return Protocol.create_response(False, error=f"Commit acknowledgements unavailable for {operation}")
                 self._apply_log_entry(entry)
                 return Protocol.create_response(True, data="OK")
 
@@ -1130,7 +1134,8 @@ class DatabaseNode:
                     expires_at=entry.expires_at,
                     created_at=entry.created_at,
                     updated_at=entry.timestamp,
-                    coordinator_id=entry.coordinator_id
+                    coordinator_id=entry.coordinator_id,
+                    sync=True,
                 )
         elif entry.command == "DELETE":
             self.store.delete(entry.key)
@@ -1140,7 +1145,8 @@ class DatabaseNode:
                     entry.key,
                     version=entry.version,
                     updated_at=entry.timestamp,
-                    coordinator_id=entry.coordinator_id
+                    coordinator_id=entry.coordinator_id,
+                    sync=True,
                 )
     
     def _get_data_for_repair(self) -> Dict[str, Tuple]:

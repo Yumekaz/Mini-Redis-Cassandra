@@ -115,7 +115,7 @@ class AOFPersistence:
                expires_at: Optional[float] = None,
                created_at: Optional[float] = None,
                updated_at: Optional[float] = None,
-               coordinator_id: str = ""):
+               coordinator_id: str = "", sync: bool = False):
         """
         Append a command to the AOF.
         
@@ -144,7 +144,7 @@ class AOFPersistence:
             self._entries_since_compact += 1
             
             # Check if immediate fsync needed
-            if time.time() - self._last_fsync > self.fsync_interval:
+            if sync or time.time() - self._last_fsync > self.fsync_interval:
                 self._do_fsync()
     
     def _do_fsync(self):

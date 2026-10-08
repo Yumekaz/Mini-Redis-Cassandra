@@ -21,7 +21,7 @@ from minidb.network.client import TCPClient
 from minidb.node import create_node
 
 
-BASE_DIR = Path("test_resilience_data") / "quorum_raw"
+BASE_DIR = (Path(os.environ["MINIDB_TEST_STATE_DIR"]) / "resilience" if "MINIDB_TEST_STATE_DIR" in os.environ else Path("test_resilience_data")) / "quorum_raw"
 
 
 def assert_success(response, label):

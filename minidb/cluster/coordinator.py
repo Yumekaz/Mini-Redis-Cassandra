@@ -301,8 +301,9 @@ class ClusterCoordinator:
         except Exception:
             return False
 
-    def commit_to_followers(self, entry: LogEntry, targets: list) -> None:
-        """Apply a previously prepared entry on followers (best-effort)."""
+    def commit_to_followers(self, entry: LogEntry, targets: list) -> int:
+        """Apply a prepared entry and count confirmed remote applications."""
+        committed = 0
         for follower_id in targets:
             node = self.membership.get_node(follower_id)
             if not node:
@@ -321,11 +322,14 @@ class ClusterCoordinator:
                         entry.to_dict(),
                         phase="commit",
                     )
-                    client.send_message(msg)
+                    response = client.send_message(msg)
+                    if response and response.payload.get("success"):
+                        committed += 1
                 finally:
                     client.disconnect()
             except Exception:
                 pass
+        return committed
     
     def _get_followers(self) -> List[str]:
         """Get list of follower node IDs."""

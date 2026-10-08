@@ -18,7 +18,7 @@ from minidb.network.client import TCPClient
 from minidb.node import create_node
 
 
-BASE_DIR = Path("test_command_data")
+BASE_DIR = Path(os.environ["MINIDB_TEST_STATE_DIR"]) / "commands" if "MINIDB_TEST_STATE_DIR" in os.environ else Path("test_command_data")
 
 
 def assert_success(response, label):
@@ -63,6 +63,13 @@ def build_cluster(replication_factor=3):
 
     assert wait_for(lambda: all(n.cluster.membership.node_count() == 3 for n in nodes))
     assert wait_for(lambda: all(n.ring.get_node_count() == 3 for n in nodes))
+
+    # Membership convergence is not election convergence. During startup each
+    # node can still hold a different leader view; do not send the command audit
+    # to the first transient self-elected node.
+    assert wait_for(lambda: len({n.cluster.get_leader_id() for n in nodes}) == 1
+                    and all(n.cluster.get_leader_id() for n in nodes)
+                    and sum(n.cluster.is_leader() for n in nodes) == 1), "leader views did not converge"
 
     leader_index = next(i for i, node in enumerate(nodes) if node.cluster.is_leader())
     return nodes, ports, leader_index

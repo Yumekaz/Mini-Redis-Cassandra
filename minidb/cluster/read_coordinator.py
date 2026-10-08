@@ -172,7 +172,7 @@ class ReadCoordinator:
             return None, False, True
         
         replicas = self._get_replicas(key)
-        quorum_size = max(1, len(replicas) // 2 + 1)
+        quorum_size = max(1, self.replication_factor // 2 + 1)
         
         # Collect responses from replicas (include missing markers)
         results = self._read_from_replicas(key, replicas, quorum_size)
@@ -209,9 +209,10 @@ class ReadCoordinator:
             return None, False, True
         
         replicas = self._get_replicas(key)
-        results = self._read_from_replicas(key, replicas, len(replicas))
+        required = self.replication_factor
+        results = self._read_from_replicas(key, replicas, required)
         
-        if len(results) < len(replicas):
+        if len(results) < required:
             return None, True, False  # Not all replicas responded
         
         present = [r for r in results if not (r.version == 0 and r.value is None)]

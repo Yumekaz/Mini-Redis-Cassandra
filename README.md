@@ -1,12 +1,14 @@
-# Mini-Redis/Cassandra — Experimental Replicated Distributed Datastore
+# MiniDB — Replicated Key-Value Datastore
 
 [![Python 3.7+](https://img.shields.io/badge/python-3.7+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 ![No Dependencies](https://img.shields.io/badge/dependencies-none-green.svg)
 
-An **experimental replicated distributed datastore** built from scratch in Python. It combines a Redis-like command surface with Cassandra-inspired sharding, replica-set reads, persistence, failure injection, and term-based cluster coordination. It is an in-memory-first systems infrastructure project designed to make replication and failure behavior observable.
+MiniDB is a Python datastore with a Redis-like command interface, consistent-hash sharding, configurable read consistency, replica acknowledgements, AOF persistence, snapshots, and fault-injection tooling.
 
-> ⚠️ **Scope**: This is serious systems infrastructure research/prototyping, but it is not production-ready. Leader election, replication, repair, and persistence are intentionally bounded implementations; the limitations below are part of the design contract.
+The 2026-10-08 local acceptance run passed 33 tests and FailForge seeds 42/43 with required successful-operation and confirmed-fault coverage. Synchronous committed AOF entries are flushed before their acknowledgements; QUORUM/ALL read thresholds use the configured replication factor, not a shrinking live ring. Failed or timed-out writes can partially apply and must be treated as indeterminate. These checks are evidence for those cases, not a consensus or universal durability proof.
+
+> **Status and scope:** Experimental software for controlled, small-cluster deployments. Leader election is simplified rather than consensus-safe; there is no split-brain fencing, TLS, authentication, or authorization. The tests exercise single-node behavior, small-cluster replication, persistence, and selected failure scenarios—they do not establish production readiness.
 
 ---
 
@@ -157,7 +159,7 @@ python tests/test_resilience.py
 | **Leader Election** | Simplified term-based election | Gossip | Paxos |
 | **Sharding** | Consistent Hash | Hash Slots | Vnodes |
 | **Persistence** | AOF + Snapshot | RDB + AOF | SSTable |
-| **Use Case** | Experimental infrastructure | Production | Production |
+| **Use Case** | Controlled small-cluster datastore work | Production | Production |
 
 **What this project provides:**
 - Consistent hashing concepts (similar to Cassandra)
