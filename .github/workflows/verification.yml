@@ -1,0 +1,43 @@
+name: Verification
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  datastore-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.12', '3.14']
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      MINIDB_TEST_STATE_DIR: ${{ github.workspace }}/verification/state
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install pytest
+      - name: Complete datastore, persistence and consistency suite
+        run: |
+          mkdir -p verification/state
+          python -m pytest -q -p no:cacheprovider --junitxml=verification/results.xml tests
+      - name: Require complete execution
+        run: |
+          python - <<'PY'
+          import xml.etree.ElementTree as ET
+          root=ET.parse('verification/results.xml').getroot()
+          cases=root.findall('.//testcase')
+          assert len(cases)>=33, f'expected full suite, got {len(cases)}'
+          assert not root.findall('.//skipped'), 'required datastore tests were skipped'
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: minidb-python-${{ matrix.python }}
+          path: verification/results.xml
