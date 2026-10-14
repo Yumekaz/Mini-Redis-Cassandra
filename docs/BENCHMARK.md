@@ -1,95 +1,43 @@
-# Benchmarks
+# Benchmark protocol
 
-Performance characteristics of Mini-Redis/Cassandra.
+MiniDB performance results must identify the source revision and the durability/consistency settings being measured. No release-grade throughput or latency figure is published in this document.
 
-## Test Environment
+Historical approximate figures without retained commands, hardware details and raw results are not current benchmark evidence. The synchronously flushed committed-write path must be measured separately from buffered or persistence-disabled writes.
 
-- Python 3.10
-- 3-node cluster on localhost
-- No fault injection
+## Record the environment
 
----
+For every published run, retain:
 
-## Mini-Redis/Cassandra Performance
+| Field | Required detail |
+| --- | --- |
+| Source | Full commit ID and any working-tree patch |
+| Host | CPU, RAM, storage device/filesystem and operating system |
+| Runtime | Python version and process/node count |
+| Topology | Localhost or multiple machines; client and cluster network setup |
+| Data | Key count, value sizes, TTL behavior and warm-up |
+| Consistency | Replication factor, write acknowledgement policy and read level |
+| Persistence | AOF/snapshot settings and committed-write flush behavior |
+| Load | Client count, operation mix, duration and offered request rate |
+| Results | Successful/failed operation counts, throughput, p50/p95/p99/max latency |
+| Resources | CPU, memory, disk growth, restarts and any missing samples |
 
-### Single-Node Operations
+## Campaign sequence
 
-| Operation | Throughput | Latency (avg) |
-|-----------|------------|---------------|
-| SET | ~4,000 ops/sec | 0.24ms |
-| GET (ANY) | ~4,300 ops/sec | 0.23ms |
-| GET (QUORUM) | ~4,400 ops/sec | 0.22ms |
-| GET (STRONG) | ~4,000 ops/sec | 0.24ms |
-| DELETE | ~4,000 ops/sec | 0.24ms |
+1. Allocate dedicated data directories and unused ports. Do not benchmark against an existing application database.
+2. Record the revision and configuration before starting nodes.
+3. Let membership settle, then seed a known data set and verify it.
+4. Run separate single-node and replicated-cluster workloads; label them accurately.
+5. Exercise read levels separately and keep write durability enabled for the durable-write result.
+6. Keep a fixed workload for each measured interval and retain per-operation outcomes.
+7. Verify final data and acknowledged writes after the interval.
+8. Repeat fresh-fixture runs. Publish the repetitions and variance, not only the best result.
 
-### Cluster Operations
+A single-node rate is not a three-node replicated-write rate. A short happy-path result is not a failure-recovery or sustained-load result. Record any faults as part of the workload rather than mixing them into an unlabeled average.
 
-| Metric | Value |
-|--------|-------|
-| Leader election time | ~2.4s |
-| Write replication latency | <10ms |
-| Node join time | ~1s |
-| Failure detection | 3-5s |
-| Rebalance (1000 keys) | ~5s |
+## Comparisons
 
----
+Compare systems only with documented, equivalent data sets, hardware, client concurrency, persistence, replication and acknowledgement requirements. Do not infer Redis/Cassandra production parity from similar command names or hashing strategies.
 
-## Comparison with Production Systems
+The [validation script](../tests/test_validation.py) includes basic checks, but those checks alone do not provide a standardized production benchmark. [FailForge](https://github.com/Yumekaz/FAILFORGE) campaigns establish selected fault/operation coverage, not a throughput target.
 
-| Metric | Mini-Redis/Cassandra | Redis | Cassandra |
-|--------|---------------------|-------|-----------|
-| **SET ops/sec** | 4,000 | 100,000+ | 50,000+ |
-| **GET ops/sec** | 4,300 | 200,000+ | 80,000+ |
-| **Latency (p99)** | <1ms | <1ms | 2-10ms |
-| **Election time** | ~2.4s | N/A (Sentinel: ~30s) | N/A (Paxos) |
-| **Nodes supported** | 3-10 | 1000+ | 1000+ |
-
-### Why the Difference?
-
-| Factor | Mini-Redis/Cassandra | Production Systems |
-|--------|---------------------|-------------------|
-| **Language** | Pure Python (interpreted) | C / Java (compiled/JIT) |
-| **Threading** | Single-threaded per connection | Multi-threaded, async I/O |
-| **Memory** | Python objects (~500B/key) | Optimized structs (~50B/key) |
-| **Network** | Blocking sockets | epoll/kqueue, zero-copy |
-| **Persistence** | Simple JSON files | Memory-mapped, binary formats |
-
----
-
-## What We Prioritized
-
-| Priority | Description |
-|----------|-------------|
-| **Inspectability** | Code and state transitions are visible and well-commented |
-| **Correctness** | Core invariants are exercised by focused tests |
-| **Simplicity** | No external dependencies |
-| **Operability** | Easy to run, observe, and failure-test |
-
----
-
-## When to Use Mini-Redis/Cassandra
-
-✅ **Good for:**
-- Distributed-systems experimentation and systems R&D
-- Prototyping replication, sharding, repair, and failure behavior
-- Integration with failure-testing workflows
-- Studying implementation trade-offs against Redis/Cassandra architectures
-
-❌ **Not for:**
-- Production workloads
-- High-throughput applications
-- Large datasets (>10,000 keys)
-- Mission-critical systems
-
----
-
-## Scalability Notes
-
-- Uses consistent hashing with 150 virtual nodes
-- Adding nodes redistributes ~25% of keys (for 3→4 nodes)
-- Memory usage: ~500 bytes per key (Python object overhead)
-- Max tested: 10 nodes, 50,000 keys
-
----
-
-Mini-Redis/Cassandra is designed for **experimental infrastructure and systems research**, not production workloads. For production, use [Redis](https://redis.io/) or [Apache Cassandra](https://cassandra.apache.org/) until the guarantees and security controls required by your deployment have been independently established.
+See [the README](../README.md) for MiniDB's supported consistency and persistence boundaries.

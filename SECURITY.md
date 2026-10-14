@@ -1,30 +1,19 @@
-# Security Policy
+# Security policy
 
-## Reporting Vulnerabilities
+## Reporting a vulnerability
 
-Please do not open public issues for security vulnerabilities.
+[Mihir Swarnkar](https://github.com/Yumekaz) is the project maintainer.
 
-Instead, report them privately via email:
-- pathaktarun431@gmail.com
+Please use a private contact method listed on the maintainer's profile. If no private channel is available, open an issue **only to request a private disclosure channel**, without exploit details, sensitive data or affected credentials. Do not publish vulnerability details in a public issue.
+
+Include the source revision, affected configuration, reproduction steps and impact in the private report. Do not attach real application data or secrets.
 
 ## Scope
 
-Mini-Redis-Cassandra is an experimental replicated distributed datastore and systems-infrastructure project implemented in Python.
+MiniDB is a replicated key-value datastore for controlled small-cluster deployments. It implements membership, simplified term-based election, consistent-hash sharding, replica acknowledgements, repair, AOF persistence and snapshots.
 
-It is **not production-ready** and must not be used for sensitive data or exposed to untrusted networks without a separate security layer.
+It does not implement consensus-grade split-brain fencing, TLS, authentication or authorization. Its security and fault guarantees are bounded by the documented implementation and tests; it has not received an independent hostile-network or tenant-isolation audit.
 
-## Security Considerations
+Keep nodes on a trusted/private network. A separately secured access layer is required before use outside that scope. Fault injection must target disposable data, not unrelated files or a live application database.
 
-The project explores mechanisms such as:
-- Distributed consensus (Raft-lite)
-- Gossip-based cluster membership
-- Consistent hashing and sharding
-- Persistence (AOF + snapshots)
-
-These mechanisms are intentionally bounded and may be incomplete under adversarial network conditions, partitions, or node compromise.
-
-For production distributed databases, use established systems such as:
-- Redis Cluster
-- Apache Cassandra
-- etcd
-- CockroachDB
+See [the README](README.md) and [design decisions](docs/DESIGN_DECISIONS.md) for the current guarantees and limitations.
